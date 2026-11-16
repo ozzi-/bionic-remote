@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Categories=Utility;
+Icon=harbour-bionic-remote
+Exec=harbour-bionic-remote
+Name=Bionic Remote
+Comment=Watch Bionic agent sessions and transcripts

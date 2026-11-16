@@ -1,0 +1,405 @@
+#!/usr/bin/env node
+// bionic-remote bridge: exposes Bionic's on-disk session stores over a small
+// token-authenticated HTTP API, so remote clients (e.g. the Sailfish app)
+// can watch agent progress and transcripts. Read-only.
+//
+// Zero dependencies. Node >= 22 (uses node:sqlite).
+//
+// Config via environment:
+//   BRIDGE_PORT        (default 8443)
+//   BRIDGE_TOKEN_FILE  (default ~/.config/bionic-remote/token)
+//   BRIDGE_TOKEN       (inline token; overrides the file)
+//   BIONIC_HOME        (default ~/.lmstudio)
+
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+
+const PORT = Number(process.env.BRIDGE_PORT || 8443);
+const BIONIC_HOME = process.env.BIONIC_HOME || path.join(os.homedir(), '.lmstudio');
+const BIONIC_APP = path.join(BIONIC_HOME, 'apps', 'bionic');
+const REGISTRY = path.join(BIONIC_APP, '.internal', 'projects-registry.json');
+const DEFAULT_STORE = path.join(BIONIC_APP, '.internal', 'ng-sessions.sqlite');
+const TOKEN_FILE = process.env.BRIDGE_TOKEN_FILE || path.join(os.homedir(), '.config', 'bionic-remote', 'token');
+const VERSION = '0.1.0';
+
+const TEXT_LIMIT = 6000;
+const WALK_LIMIT = 5000;
+const ACTIVE_WINDOW_MS = 20000;
+
+function log(...a) { console.log(new Date().toISOString(), ...a); }
+
+// ---------- auth / network guards ----------
+
+function loadToken() {
+  if (process.env.BRIDGE_TOKEN) return process.env.BRIDGE_TOKEN;
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function tokenValid(provided) {
+  const expected = loadToken();
+  if (!expected || !provided) return false;
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function ipAllowed(remote) {
+  let ip = (remote || '').replace(/^::ffff:/, '');
+  if (ip === '127.0.0.1' || ip === '::1') return true;
+  // Tailscale IPv6 (fd7a::/8)
+  if (/^fd7a:/i.test(ip)) return true;
+  // IPv4 CIDR checks
+  const m = ip.split('.').map(Number);
+  if (m.length !== 4 || m.some((n) => Number.isNaN(n))) return false;
+  const inCidr = (base, mask) => {
+    const b = base.split('.').map(Number);
+    let maskVal = 0;
+    for (let i = 0; i < mask; i++) maskVal = (maskVal << 1) | 1;
+    const shift = 32 - mask;
+    return ((m[0] << 24 | m[1] << 16 | m[2] << 8 | m[3]) >>> shift) ===
+           ((b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3]) >>> shift);
+  };
+  return inCidr('100.64.0.0', 10) ||   // Tailscale CGNAT
+         inCidr('10.0.0.0', 8) ||
+         inCidr('172.16.0.0', 12) ||
+         inCidr('192.168.0.0', 16);
+}
+
+// ---------- bionic data access ----------
+
+function loadProjects() {
+  const raw = JSON.parse(fs.readFileSync(REGISTRY, 'utf8'));
+  const projects = [];
+  for (const [id, info] of raw?.json?.projects || []) {
+    const projDir = path.join(BIONIC_APP, 'projects', id);
+    let name = id;
+    try {
+      name = JSON.parse(fs.readFileSync(path.join(projDir, 'project.json'), 'utf8')).name || id;
+    } catch { /* keep id */ }
+    let dbPath = path.join(projDir, '.internal', 'ng-sessions.sqlite');
+    if (!fs.existsSync(dbPath) && id === 'default-project-identifier') dbPath = DEFAULT_STORE;
+    if (!fs.existsSync(dbPath)) dbPath = null;
+    projects.push({ id, name, path: info?.projectWorkingDirectoryPath || projDir, dbPath });
+  }
+  if (!projects.some((p) => p.id === 'general')) {
+    projects.unshift({ id: 'general', name: 'General', path: BIONIC_APP, dbPath: fs.existsSync(DEFAULT_STORE) ? DEFAULT_STORE : null });
+  }
+  return projects;
+}
+
+function openDb(dbPath) {
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
+function listSessions(db) {
+  const rows = db.prepare(`
+    SELECT session_id, session_name, suggested_session_name, has_unread,
+           committed_head_entry_id, updated_timestamp
+    FROM sessions
+    WHERE is_transient = 0 AND is_temporary = 0
+    ORDER BY updated_timestamp DESC
+  `).all();
+  return rows.map((r) => {
+    let pending = false, tailKind = null, lastEntryTs = 0;
+    try {
+      const { entries, pendingApproval, lastEntryTs: ts } = transcript(db, r.committed_head_entry_id, 50);
+      pending = !!pendingApproval;
+      tailKind = entries.length ? entries[entries.length - 1].kind : null;
+      lastEntryTs = ts || 0;
+    } catch { /* unreadable store */ }
+    const fresh = Math.max(Number(r.updated_timestamp) || 0, lastEntryTs);
+    return {
+      id: r.session_id,
+      name: r.session_name || r.suggested_session_name || 'Untitled session',
+      updatedAt: fresh,
+      hasUnread: !!r.has_unread,
+      active: isActive(fresh, pending, tailKind),
+      pendingApproval: pending,
+      tailKind,
+    };
+  });
+}
+
+function renderLoc(lm) {
+  const parts = lm?.descriptor?.defaultMessage;
+  if (!Array.isArray(parts)) return '';
+  return parts.map((p) => (p?.type === 1 ? `[${p.value}]` : (p?.value ?? ''))).join('');
+}
+
+function flattenPartValues(pv) {
+  const out = {};
+  for (const [k, v] of Object.entries(pv || {})) {
+    if (v && typeof v === 'object' && v.text) out[k] = v.text;
+    else if (v && typeof v === 'object') out[k] = JSON.stringify(v);
+    else out[k] = String(v);
+  }
+  return out;
+}
+
+function trunc(s) {
+  s = String(s ?? '');
+  return s.length > TEXT_LIMIT ? s.slice(0, TEXT_LIMIT) + ' …' : s;
+}
+
+// Walk the entry chain backwards from the head, newest first.
+function walkEntries(db, headId) {
+  const byId = new Map();
+  const get = (id) => {
+    if (byId.has(id)) return byId.get(id);
+    let row = null;
+    try {
+      row = db.prepare('SELECT entry_json FROM chat_entries WHERE id = ?').get(id);
+    } catch { row = null; }
+    let entry = null;
+    if (row) {
+      try { entry = JSON.parse(row.entry_json); } catch { entry = null; }
+    }
+    byId.set(id, entry);
+    return entry;
+  };
+
+  const chain = [];
+  const seen = new Set();
+  let cur = headId;
+  while (cur && chain.length < WALK_LIMIT && !seen.has(cur)) {
+    seen.add(cur);
+    let entry = get(cur);
+    if (!entry) break;
+    if (entry.type === 'redirect' && entry.redirect_to_id) {
+      const target = get(entry.redirect_to_id);
+      if (target) { chain.push(target); cur = target.previousId; continue; }
+    }
+    chain.push(entry);
+    cur = entry.previousId;
+  }
+  return chain;
+}
+
+function normalizeEntry(entry, answeredRequests) {
+  const t = entry?.type;
+  if (t === 'message') {
+    if (entry.hidden) return null;
+    const msg = entry.message || {};
+    const role = msg.role;
+    const parts = Array.isArray(msg.parts) ? msg.parts : [];
+    const texts = [];
+    let toolCall = null;
+    for (const p of parts) {
+      if (!p) continue;
+      if (p.type === 'text' && p.text) texts.push(String(p.text));
+      else if (p.type === 'toolCall') {
+        toolCall = {
+          tool: p.name || p.toolId || p.toolName || 'tool',
+          args: trunc(JSON.stringify(p.args ?? p.arguments ?? p.input ?? {})),
+        };
+      }
+      else if (p.type === 'toolCallResult') {
+        const r = (p.result || []).map((x) => (x?.type === 'text' ? x.text : JSON.stringify(x))).join('\n');
+        if (r) texts.push(r);
+      }
+    }
+    const text = trunc(texts.join('\n'));
+    if (role === 'user') return text ? { kind: 'user', text } : null;
+    if (role === 'assistant') {
+      if (toolCall && !text) return { kind: 'tool_call', ...toolCall };
+      if (toolCall && text) return { kind: 'assistant', text, tool: toolCall.tool, args: toolCall.args };
+      return text ? { kind: 'assistant', text } : null;
+    }
+    if (role === 'tool') return text ? { kind: 'tool_result', text } : null;
+    return text ? { kind: 'system', text } : null;
+  }
+  if (t === 'elicitationRequest') {
+    const choices = (entry.steps || []).flatMap((s) => (s?.choices || []).map((c) => ({ value: c.value, label: renderLoc(c.label) || String(c.value) })));
+    return {
+      kind: 'approval',
+      title: renderLoc(entry.title) || (entry.source?.toolId || 'Approval request'),
+      description: renderLoc(entry.description),
+      details: flattenPartValues(entry.partValues),
+      tool: entry.source?.toolId || null,
+      choices,
+      requestId: entry.requestId || null,
+      answered: !!answeredRequests.has(entry.requestId),
+    };
+  }
+  if (t === 'stateChange') {
+    const sc = (entry.stateChanges || [])[0];
+    if (sc?.previewText) return { kind: 'system', text: String(sc.previewText) };
+    return null;
+  }
+  if (t === 'turnSummary') return { kind: 'system', text: '— earlier conversation was summarized —' };
+  if (t === 'interrupted') return { kind: 'system', text: 'Interrupted' };
+  return null; // forkPoint, subSessionReference, resourceHold, ...
+}
+
+function transcript(db, headId, limit = 100) {
+  const chain = walkEntries(db, headId);
+  let lastEntryTs = 0;
+  for (const e of chain) {
+    const ts = Number(e?.createdTimestamp) || 0;
+    if (ts > lastEntryTs) lastEntryTs = ts;
+  }
+  const answered = new Set();
+  for (const e of chain) if (e?.type === 'elicitationResponse' && e.requestId) answered.add(e.requestId);
+  const out = [];
+  for (const e of chain) {
+    const n = normalizeEntry(e, answered);
+    if (n) out.push(n);
+  }
+  out.reverse(); // oldest → newest
+  const entries = out.slice(-Math.max(1, limit));
+  let pending = null;
+  for (let i = out.length - 1; i >= 0; i--) {
+    const n = out[i];
+    if (n.kind === 'approval') { pending = n.answered ? null : n; break; }
+  }
+  return { entries, pendingApproval: pending, lastEntryTs };
+}
+
+const STALE_WINDOW_MS = 15 * 60 * 1000;
+
+// A finished turn always ends with a plain assistant text message; anything
+// else at the tail means the turn is still in flight (model or tool pending).
+function isActive(updatedTs, pending, tailKind) {
+  const age = Date.now() - Number(updatedTs);
+  if (age < ACTIVE_WINDOW_MS) return true;
+  if (pending) return true;
+  if (tailKind && tailKind !== 'assistant' && age < STALE_WINDOW_MS) return true;
+  return false;
+}
+
+function sessionDetail(db, sid) {
+  let row = null;
+  try { row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(sid); } catch { row = null; }
+  if (!row) return null;
+  const { entries, pendingApproval, lastEntryTs } = transcript(db, row.committed_head_entry_id, 50);
+  const tailKind = entries.length ? entries[entries.length - 1].kind : null;
+  const fresh = Math.max(Number(row.updated_timestamp) || 0, lastEntryTs || 0);
+  return {
+    id: row.session_id,
+    name: row.session_name || row.suggested_session_name || 'Untitled session',
+    updatedAt: fresh,
+    hasUnread: !!row.has_unread,
+    active: isActive(fresh, !!pendingApproval, tailKind),
+    pendingApproval,
+    lastActivity: tailKind,
+    headEntryId: row.committed_head_entry_id,
+  };
+}
+
+// ---------- http ----------
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+const server = http.createServer((req, res) => {
+  const remote = req.socket.remoteAddress || '';
+  if (!ipAllowed(remote)) return sendJson(res, 403, { error: 'source address not allowed' });
+  const url = new URL(req.url, 'http://localhost');
+  const auth = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+  if (url.pathname !== '/v1/health' && !tokenValid(auth)) {
+    return sendJson(res, 401, { error: 'unauthorized' });
+  }
+
+  const p = url.pathname;
+  try {
+    if (req.method === 'GET' && p === '/v1/health') {
+      const projects = loadProjects().filter((x) => x.dbPath);
+      return sendJson(res, 200, { ok: true, name: 'bionic-remote-bridge', version: VERSION, projects: projects.length, time: Date.now() });
+    }
+
+    if (req.method === 'GET' && p === '/v1/projects') {
+      const now = Date.now();
+      const projects = loadProjects().map((pr) => {
+        let sessionCount = 0, lastActivity = 0, active = false;
+        if (pr.dbPath) {
+          try {
+            const db = openDb(pr.dbPath);
+            const rows = listSessions(db);
+            sessionCount = rows.length;
+            for (const s of rows) {
+              if (s.updatedAt > lastActivity) lastActivity = s.updatedAt;
+              if (s.active) active = true;
+            }
+            db.close();
+          } catch { /* store unavailable */ }
+        }
+        return {
+          id: pr.id, name: pr.name, path: pr.path,
+          sessionCount,
+          lastActivity: now - lastActivity < 365e10 ? lastActivity : null,
+          active,
+        };
+      }).filter((pr) => pr.dbPath || pr.sessionCount > 0);
+      return sendJson(res, 200, { projects });
+    }
+
+    const mSess = p.match(/^\/v1\/projects\/([^/]+)\/sessions$/);
+    if (req.method === 'GET' && mSess) {
+      const pr = loadProjects().find((x) => x.id === decodeURIComponent(mSess[1]));
+      if (!pr) return sendJson(res, 404, { error: 'unknown project' });
+      if (!pr.dbPath) return sendJson(res, 503, { error: 'session store not found' });
+      const db = openDb(pr.dbPath);
+      try {
+        const sessions = listSessions(db);
+        return sendJson(res, 200, { project: { id: pr.id, name: pr.name, path: pr.path }, sessions });
+      } finally { db.close(); }
+    }
+
+    const mTrans = p.match(/^\/v1\/projects\/([^/]+)\/sessions\/([^/]+)\/transcript$/);
+    if (req.method === 'GET' && mTrans) {
+      const pr = loadProjects().find((x) => x.id === decodeURIComponent(mTrans[1]));
+      if (!pr) return sendJson(res, 404, { error: 'unknown project' });
+      if (!pr.dbPath) return sendJson(res, 503, { error: 'session store not found' });
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 100)));
+      const db = openDb(pr.dbPath);
+      try {
+        const detail = sessionDetail(db, decodeURIComponent(mTrans[2]));
+        if (!detail) return sendJson(res, 404, { error: 'unknown session' });
+        const { entries, pendingApproval } = transcript(db, detail.headEntryId, limit);
+        return sendJson(res, 200, {
+          session: { id: detail.id, name: detail.name, updatedAt: detail.updatedAt, active: detail.active },
+          pendingApproval,
+          entries,
+        });
+      } finally { db.close(); }
+    }
+
+    const mDet = p.match(/^\/v1\/projects\/([^/]+)\/sessions\/([^/]+)$/);
+    if (req.method === 'GET' && mDet) {
+      const pr = loadProjects().find((x) => x.id === decodeURIComponent(mDet[1]));
+      if (!pr) return sendJson(res, 404, { error: 'unknown project' });
+      if (!pr.dbPath) return sendJson(res, 503, { error: 'session store not found' });
+      const db = openDb(pr.dbPath);
+      try {
+        const detail = sessionDetail(db, decodeURIComponent(mDet[2]));
+        if (!detail) return sendJson(res, 404, { error: 'unknown session' });
+        return sendJson(res, 200, detail);
+      } finally { db.close(); }
+    }
+
+    return sendJson(res, 404, { error: 'not found' });
+  } catch (err) {
+    log('ERROR', req.method, p, String(err?.stack || err));
+    return sendJson(res, 500, { error: 'internal error' });
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  log(`bionic-remote-bridge v${VERSION} listening on 0.0.0.0:${PORT} (bionic home: ${BIONIC_HOME})`);
+});

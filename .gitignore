@@ -1,0 +1,7 @@
+*~
+*.autosave
+*.pro.user
+*.pro.user.*
+*.user
+dist/
+RPMS
