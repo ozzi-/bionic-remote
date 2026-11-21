@@ -125,6 +125,8 @@ Page {
                 spacing: 2
 
                 Row {
+                    id: nameRow
+                    width: parent.width
                     spacing: Theme.paddingSmall
                     Rectangle {
                         id: activeDot

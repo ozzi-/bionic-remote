@@ -6,6 +6,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSettings>
+#include <QDebug>
+#include <QCoreApplication>
 
 Client::Client(QObject *parent)
     : QObject(parent)
@@ -15,6 +17,14 @@ Client::Client(QObject *parent)
     m_serverUrl = settings.value(QStringLiteral("serverUrl"),
                                  QStringLiteral("http://192.168.178.32:8443")).toString();
     m_token = settings.value(QStringLiteral("token")).toString();
+    qInfo().noquote() << QStringLiteral("[BRC] settings file: %1")
+                       .arg(settings.fileName().toLocal8Bit().constData());
+    qInfo().noquote() << QStringLiteral("[BRC] org=%1 app=%2 serverUrl=%3 tokenLen=%4 allKeys=%5")
+                       .arg(QCoreApplication::organizationName())
+                       .arg(QCoreApplication::applicationName())
+                       .arg(m_serverUrl)
+                       .arg(m_token.length())
+                       .arg(settings.allKeys().join(","));
 }
 
 QString Client::serverUrl() const
@@ -71,6 +81,8 @@ void Client::testConnection()
 
 void Client::doFetch(Endpoint endpoint, const QString &path)
 {
+    qInfo().noquote() << QStringLiteral("[BRC] fetch %1 -> %2 (tokenLen=%3)")
+                      .arg(endpoint).arg(m_serverUrl + path).arg(m_token.length());
     if (m_serverUrl.isEmpty()) {
         emitResult(endpoint, false, QString(), tr("No server configured"));
         return;
@@ -95,6 +107,10 @@ void Client::doFetch(Endpoint endpoint, const QString &path)
                 error = tr("HTTP %1").arg(status);
         }
 
+        qInfo().noquote() << QStringLiteral("[BRC] done %1 status=%2 err=%3 bodyHead=%4")
+                          .arg(endpoint).arg(status)
+                          .arg(reply->errorString())
+                          .arg(QString::fromUtf8(body.left(160)));
         reply->deleteLater();
         emitResult(endpoint, ok, QString::fromUtf8(body), error);
     });

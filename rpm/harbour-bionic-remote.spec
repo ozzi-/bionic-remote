@@ -6,7 +6,7 @@ Name:       harbour-bionic-remote
 %{?qtc_builddir:%define _builddir %qtc_builddir}
 Summary:    Bionic Remote
 Version:    0.1.0
-Release:    1
+Release:    5
 Group:      Qt/Qt
 License:    MIT
 URL:        https://github.com/ozzi-
@@ -29,14 +29,27 @@ session stores over a token-authenticated HTTP API.
 %prep
 %setup -q -n %{name}-%{version}
 
+# NOTE: mb2/sfdk does not run the prep section, so the source tree is NOT
+# unpacked into a name-version directory the way a stock rpmbuild %setup would
+# do it. The tree lives either at %{_builddir}/%{name}-%{version} (when a stock
+# %setup ran, e.g. some aarch64 flows) or directly at %{_builddir} (sfdk
+# in-place / mb2). Resolve the real source root robustly for both cases.
 %build
-cd %{_builddir}/%{name}-%{version}
+if [ -d %{_builddir}/%{name}-%{version} ]; then
+  cd %{_builddir}/%{name}-%{version}
+else
+  cd %{_builddir}
+fi
 qmake BionicRemote.pro
 make
 
 %install
 rm -rf %{buildroot}
-cd %{_builddir}/%{name}-%{version}
+if [ -d %{_builddir}/%{name}-%{version} ]; then
+  cd %{_builddir}/%{name}-%{version}
+else
+  cd %{_builddir}
+fi
 make INSTALL_ROOT=%{buildroot} install
 
 desktop-file-install --delete-original       \
