@@ -48,7 +48,11 @@ Page {
     property color bgColor: darkMode ? "#18181B" : "#FCFCFC"
     property color fgColor: darkMode ? "#F5F5F6" : "#18181B"
     property color mutedColor: darkMode ? "#A1A1AA" : "#52525B"
-    property color userBubbleColor: darkMode ? "#2E2E33" : "#E4E4E6"
+    // User bubble: dark purple + white text in BOTH themes — deliberately
+    // distinct from the assistant's neutral-gray bubble so it's obvious who
+    // is who at a glance.
+    property color userBubbleColor: "#4A2E63"
+    property color userTextColor: "#FFFFFF"
     property color assistBubbleColor: darkMode ? "#202024" : "#F0F0F1"
     property color cardBgColor: darkMode ? "#1F1F23" : "#F5F5F6"
     property color cardBorderColor: darkMode ? "#3A3A41" : "#D9D9DE"
@@ -132,8 +136,23 @@ Page {
                 continue
             }
             if (kind === "assistant") {
+                // Bionic's entry order stores the assistant reply FIRST and the
+                // reasoning (thinking) right after it, so the thinking would
+                // render below the reply. Bionic's convention (and the user)
+                // wants thinking ABOVE the reply → emit the leading reasoning
+                // card(s) before the assistant bubble, then consume them.
+                var j = i + 1
+                var lead = []
+                while (j < entries.length && entries[j].kind === "reasoning") {
+                    lead.push(entries[j].text || "")
+                    j++
+                }
+                for (var r = 0; r < lead.length; r++) {
+                    items.push({ "view": "thinking", "text": lead[r],
+                                 "sig": "th|" + i + "|" + r + "|" + String(lead[r]).slice(0, 32) })
+                }
                 items.push({ "view": "assistant", "text": e.text || "" })
-                i++
+                i = j
                 continue
             }
             if (kind === "approval") {
@@ -327,7 +346,7 @@ Page {
                     anchors { right: parent.right; rightMargin: 14; top: parent.top; topMargin: 12 }
                     width: Math.min(uText.implicitWidth, parent.width - 28)
                     text: model.text
-                    color: page.fgColor
+                    color: page.userTextColor
                     font.pixelSize: Theme.fontSizeLarge
                     wrapMode: Text.Wrap
                 }
