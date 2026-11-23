@@ -28,17 +28,30 @@ Page {
 
     ListModel { id: entryModel }
 
-    // ---------------- Bionic palette (extracted from Bionic's own theme) ----
-    // Dark = Bionic "Base Dark" (gray-950 bg / gray-50 fg / surface-1..2),
-    // Light = "Base Light". Brand = lm-indigo.
-    readonly property bool darkMode: Theme.colorScheme === Theme.Dark
+    // ---------------- theme ----------------
+    // SOLID per-theme palette (neutral grays, Bionic-style) — verified on
+    // the emulator: solid colors composite exactly as written, but
+    // semi-transparent (Theme.rgba) colors composite DARKER than their
+    // nominal alpha on this stack, so alpha-tinted surfaces are not
+    // predictable. Key the palette on the system theme:
+    //   Theme.colorScheme === 0  →  LightOnDark  (dark system)
+    //   Theme.colorScheme === 1  →  DarkOnLight  (light system)
+    // (0 = LightOnDark is the raw enum value; Theme.LightOnDark also works
+    // — stock ApplicationWindow.qml does exactly this comparison.)
+    //
+    // GOTCHA (learned the hard way, cost a phone round-trip): the first
+    // attempt used `Theme.colorScheme === Theme.Dark` — that constant does
+    // NOT exist, so the comparison was always false and the page silently
+    // rendered the light palette in every theme. The working constants are
+    // LightOnDark / DarkOnLight only.
+    readonly property bool darkMode: Theme.colorScheme === 0
     property color bgColor: darkMode ? "#18181B" : "#FCFCFC"
-    property color fgColor: darkMode ? "#FCFCFC" : "#18181B"
+    property color fgColor: darkMode ? "#F5F5F6" : "#18181B"
     property color mutedColor: darkMode ? "#A1A1AA" : "#52525B"
-    property color userBubbleColor: darkMode ? "#2B2B2F" : "#E8E8E9"
+    property color userBubbleColor: darkMode ? "#2E2E33" : "#E4E4E6"
     property color assistBubbleColor: darkMode ? "#202024" : "#F0F0F1"
     property color cardBgColor: darkMode ? "#1F1F23" : "#F5F5F6"
-    property color cardBorderColor: darkMode ? "#34343B" : "#D9D9DE"
+    property color cardBorderColor: darkMode ? "#3A3A41" : "#D9D9DE"
     property color brandColor: "#7171E8"
 
     // ---------------- helpers ----------------
@@ -198,7 +211,8 @@ Page {
 
     // ---------------- UI ----------------
 
-    // Bionic chat-body background behind the list (list has no background).
+    // Chat-body background: solid per-theme color so bubbles and cards sit
+    // on a predictable surface regardless of the system wallpaper.
     Rectangle {
         anchors.fill: parent
         color: page.bgColor
@@ -237,8 +251,8 @@ Page {
 
             Rectangle {
                 anchors.fill: parent
-                color: Theme.highlightBackgroundColor
-                border.color: Theme.highlightColor
+                color: page.darkMode ? "#26262E" : "#ECECF6"
+                border.color: page.brandColor
                 border.width: 1
             }
 
@@ -314,8 +328,7 @@ Page {
                     width: Math.min(uText.implicitWidth, parent.width - 28)
                     text: model.text
                     color: page.fgColor
-                    font.pixelSize: 16
-                    font.family: "Sans Serif"
+                    font.pixelSize: Theme.fontSizeLarge
                     wrapMode: Text.Wrap
                 }
             }
@@ -341,8 +354,7 @@ Page {
                     width: Math.min(aText.implicitWidth, parent.width - 28)
                     text: model.text
                     color: page.fgColor
-                    font.pixelSize: 16
-                    font.family: "Sans Serif"
+                    font.pixelSize: Theme.fontSizeLarge
                     wrapMode: Text.Wrap
                 }
             }
@@ -393,7 +405,7 @@ Page {
                              : (model.count === 1 ? qsTr("1 TOOL CALL")
                                                   : model.count + " " + qsTr("TOOL CALLS"))
                         color: page.mutedColor
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.fontSizeSmall
                         font.letterSpacing: 0.03
                         elide: Text.ElideRight
                     }
@@ -402,7 +414,7 @@ Page {
                         anchors.right: parent.right
                         text: card.cardExpanded ? "▴" : "▾"
                         color: page.mutedColor
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.fontSizeSmall
                     }
 
                     MouseArea {
@@ -426,8 +438,7 @@ Page {
                     width: parent.width - 2 * parent.cardPad
                     text: model.text
                     color: page.mutedColor
-                    font.pixelSize: 13
-                    font.family: "Sans Serif"
+                    font.pixelSize: Theme.fontSizeMedium
                     wrapMode: Text.Wrap
                 }
 
@@ -448,7 +459,7 @@ Page {
                         id: collapseLabel
                         text: qsTr("Collapse")
                         color: page.brandColor
-                        font.pixelSize: 13
+                        font.pixelSize: Theme.fontSizeMedium
                     }
 
                     MouseArea {
@@ -476,12 +487,12 @@ Page {
                     width: parent.width
                     text: model.text
                     color: model.highlight ? page.brandColor : page.mutedColor
-                    font.pixelSize: 12
-                    font.family: "Sans Serif"
+                    font.pixelSize: Theme.fontSizeSmall
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
                 }
             }
         }
     }
+
 }
