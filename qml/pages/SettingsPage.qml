@@ -31,18 +31,21 @@ Page {
         }
     }
 
-    PageHeader {
-        title: qsTr("Settings")
-        IconButton {
-            icon.source: "image://theme/icon-m-back"
-            onClicked: pageStack.pop()
-        }
-    }
-
     SilicaFlickable {
         anchors.fill: parent
         contentWidth: width
         contentHeight: col.implicitHeight + Theme.paddingLarge
+
+        // SFOS 5.1 layout contract: PageHeader MUST live in the view header.
+        // As a plain Page child it floats top-right WITHOUT reserving space.
+        // (QML-GOTCHAS.md)
+        header: PageHeader {
+            title: qsTr("Settings")
+            IconButton {
+                icon.source: "image://theme/icon-m-back"
+                onClicked: pageStack.pop()
+            }
+        }
 
         Column {
             id: col

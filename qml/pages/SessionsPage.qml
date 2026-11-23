@@ -64,26 +64,29 @@ Page {
         return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate()
     }
 
-    PageHeader {
-        title: page.projectName !== "" ? page.projectName : qsTr("Sessions")
-        description: page.errorText !== "" ? qsTr("Connection error")
-                                           : (page.loading ? qsTr("Connecting…") : qsTr("Connected"))
-        IconButton {
-            icon.source: "image://theme/icon-m-back"
-            onClicked: pageStack.pop()
-        }
-    }
-
-    ViewPlaceholder {
-        visible: sessionModel.count === 0
-        text: page.errorText !== "" ? page.errorText
-                                   : (page.loading ? qsTr("Loading…") : qsTr("No sessions"))
-    }
-
     SilicaListView {
         id: list
         anchors.fill: parent
         model: sessionModel
+
+        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
+        // As a plain Page child it floats top-right WITHOUT reserving space,
+        // so the first list item renders on top of it. (QML-GOTCHAS.md)
+        header: PageHeader {
+            title: page.projectName !== "" ? page.projectName : qsTr("Sessions")
+            description: page.errorText !== "" ? qsTr("Connection error")
+                                               : (page.loading ? qsTr("Connecting…") : qsTr("Connected"))
+            IconButton {
+                icon.source: "image://theme/icon-m-back"
+                onClicked: pageStack.pop()
+            }
+        }
+
+        ViewPlaceholder {
+            visible: sessionModel.count === 0
+            text: page.errorText !== "" ? page.errorText
+                                       : (page.loading ? qsTr("Loading…") : qsTr("No sessions"))
+        }
 
         delegate: ListItem {
             width: list.width

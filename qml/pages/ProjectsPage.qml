@@ -68,30 +68,33 @@ Page {
         return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate()
     }
 
-    PageHeader {
-        title: qsTr("Projects")
-        description: page.connectionError !== "" ? qsTr("Connection error")
-                                                 : (page.loading ? qsTr("Connecting…") : qsTr("Connected"))
-        MenuItem {
-            text: qsTr("Settings")
-            onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
-        }
-    }
-
     BusyIndicator {
         anchors.centerIn: parent
         running: page.loading && projectModel.count === 0
-    }
-
-    ViewPlaceholder {
-        visible: projectModel.count === 0 && !page.loading
-        text: page.connectionError !== "" ? page.connectionError : qsTr("No projects found")
     }
 
     SilicaListView {
         id: list
         anchors.fill: parent
         model: projectModel
+
+        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
+        // As a plain Page child it floats top-right WITHOUT reserving space,
+        // so the first list item renders on top of it. (QML-GOTCHAS.md)
+        header: PageHeader {
+            title: qsTr("Projects")
+            description: page.connectionError !== "" ? qsTr("Connection error")
+                                                     : (page.loading ? qsTr("Connecting…") : qsTr("Connected"))
+            MenuItem {
+                text: qsTr("Settings")
+                onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
+            }
+        }
+
+        ViewPlaceholder {
+            visible: projectModel.count === 0 && !page.loading
+            text: page.connectionError !== "" ? page.connectionError : qsTr("No projects found")
+        }
 
         PullDownMenu {
             MenuItem {

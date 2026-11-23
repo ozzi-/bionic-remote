@@ -4,6 +4,13 @@ import Sailfish.Silica 1.0
 Page {
     id: page
 
+    // ---------------- data contract ----------------
+    // The bridge emits entries with kind: user | assistant | reasoning |
+    // tool_call | tool_result | system | approval. This page groups them into
+    // "views": user/assistant bubbles, "thinking" cards (reasoning),
+    // "toolgroup" cards (consecutive tool_call + tool_result runs) and
+    // "line" (system / approval).
+
     property string projectId: ""
     property string sessionId: ""
 
@@ -16,19 +23,136 @@ Page {
     property string approvalTitle: ""
     property string approvalDesc: ""
 
+    // Expanded state survives model rebuilds, keyed by entry signature.
+    property var expandedSigs: ({})
+
     ListModel { id: entryModel }
 
+    // ---------------- Bionic palette (extracted from Bionic's own theme) ----
+    // Dark = Bionic "Base Dark" (gray-950 bg / gray-50 fg / surface-1..2),
+    // Light = "Base Light". Brand = lm-indigo.
+    readonly property bool darkMode: Theme.colorScheme === Theme.Dark
+    property color bgColor: darkMode ? "#18181B" : "#FCFCFC"
+    property color fgColor: darkMode ? "#FCFCFC" : "#18181B"
+    property color mutedColor: darkMode ? "#A1A1AA" : "#52525B"
+    property color userBubbleColor: darkMode ? "#2B2B2F" : "#E8E8E9"
+    property color assistBubbleColor: darkMode ? "#202024" : "#F0F0F1"
+    property color cardBgColor: darkMode ? "#1F1F23" : "#F5F5F6"
+    property color cardBorderColor: darkMode ? "#34343B" : "#D9D9DE"
+    property color brandColor: "#7171E8"
+
+    // ---------------- helpers ----------------
+
+    function setExpanded(sig, value) {
+        if (sig === "" || sig === undefined)
+            return
+        if (value)
+            page.expandedSigs[sig] = true
+        else
+            delete page.expandedSigs[sig]
+    }
+
+    function formatToolCalls(calls) {
+        var out = ""
+        for (var i = 0; i < calls.length; i++) {
+            var c = calls[i]
+            out += c.tool
+            if (c.args && c.args.length > 0)
+                out += "\n" + c.args
+            if (c.result && c.result.length > 0)
+                out += "\n—\n" + c.result
+            if (i < calls.length - 1)
+                out += "\n\n"
+        }
+        return out
+    }
+
+    function buildItems(entries) {
+        var items = []
+        var i = 0
+        while (i < entries.length) {
+            var e = entries[i]
+            var kind = e.kind || ""
+            if (kind === "tool_call" || kind === "tool_result") {
+                var calls = []
+                var cur = null
+                while (i < entries.length
+                       && (entries[i].kind === "tool_call" || entries[i].kind === "tool_result")) {
+                    if (entries[i].kind === "tool_call") {
+                        cur = { tool: entries[i].tool || "tool",
+                                args: entries[i].args || "",
+                                result: "" }
+                        calls.push(cur)
+                    } else {
+                        // tool_result (possibly orphaned by window slicing)
+                        if (cur) {
+                            cur.result = entries[i].text || ""
+                        } else {
+                            cur = { tool: "result", args: "", result: entries[i].text || "" }
+                            calls.push(cur)
+                        }
+                    }
+                    i++
+                }
+                var first = calls.length > 0 ? calls[0] : null
+                items.push({
+                    "view": "toolgroup",
+                    "count": calls.length,
+                    "text": formatToolCalls(calls),
+                    "sig": "tg|" + calls.length + "|" + (first ? first.tool : "")
+                           + "|" + (first ? String(first.args).slice(0, 32) : "")
+                })
+                continue
+            }
+            if (kind === "reasoning") {
+                items.push({
+                    "view": "thinking",
+                    "text": e.text || "",
+                    "sig": "th|" + i + "|" + String(e.text || "").slice(0, 32)
+                })
+                i++
+                continue
+            }
+            if (kind === "user") {
+                items.push({ "view": "user", "text": e.text || "" })
+                i++
+                continue
+            }
+            if (kind === "assistant") {
+                items.push({ "view": "assistant", "text": e.text || "" })
+                i++
+                continue
+            }
+            if (kind === "approval") {
+                var title = e.title || qsTr("Approval")
+                var desc = e.description || ""
+                var state = e.answered ? qsTr("answered") : qsTr("pending")
+                items.push({ "view": "line",
+                             "text": title + (desc !== "" ? " — " + desc : "")
+                                    + " (" + state + ")",
+                             "highlight": e.answered ? false : true })
+                i++
+                continue
+            }
+            items.push({ "view": "line", "text": e.text || "", "highlight": false })
+            i++
+        }
+        return items
+    }
+
     function refresh() {
-        client.fetchTranscript(page.projectId, page.sessionId, 100)
+        client.fetchTranscript(page.projectId, page.sessionId, 150)
     }
 
     Component.onCompleted: refresh()
 
+    // Soft polling: only while the session is active AND this page is shown.
     Timer {
-        interval: 4000
+        id: pollTimer
+        interval: 2500
         repeat: true
-        running: true
-        onTriggered: refresh()
+        running: page.active && page.sessionActive
+        onTriggered: page.refresh()
     }
 
     Connections {
@@ -56,46 +180,60 @@ Page {
                 page.approvalDesc = ""
             }
             var entries = data.entries || []
+            var items = page.buildItems(entries)
             entryModel.clear()
-            for (var i = 0; i < entries.length; i++) {
-                var e = entries[i]
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i]
                 entryModel.append({
-                    "kind": e.kind || "",
-                    "text": e.text || "",
-                    "tool": e.tool || ""
+                    "view": it.view,
+                    "text": it.text || "",
+                    "count": it.count || 0,
+                    "sig": it.sig || "",
+                    "highlight": it.highlight === true,
+                    "expanded": (it.sig !== "" && page.expandedSigs[it.sig] === true)
                 })
             }
         }
     }
 
-    PageHeader {
-        title: page.sessionName !== "" ? page.sessionName : qsTr("Session")
-        description: page.errorText !== "" ? qsTr("Connection error")
-                  : (page.hasPending ? qsTr("Awaiting approval")
-                  : (page.sessionActive ? qsTr("Agent active")
-                  : (page.loading ? qsTr("Connecting…") : qsTr("Idle"))))
-        IconButton {
-            icon.source: "image://theme/icon-m-back"
-            onClicked: pageStack.pop()
-        }
-    }
+    // ---------------- UI ----------------
 
-    ViewPlaceholder {
-        visible: entryModel.count === 0
-        text: page.errorText !== "" ? page.errorText
-                                   : (page.loading ? qsTr("Loading…") : qsTr("Empty session"))
+    // Bionic chat-body background behind the list (list has no background).
+    Rectangle {
+        anchors.fill: parent
+        color: page.bgColor
     }
 
     SilicaListView {
         id: list
         anchors.fill: parent
+        clip: true
         model: entryModel
 
-        header: Item {
-            id: banner
+        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
+        // As a plain Page child it floats top-right WITHOUT reserving space,
+        // so the first entry renders on top of it. (QML-GOTCHAS.md)
+        header: Column {
             width: list.width
-            height: bannerCol.implicitHeight + Theme.paddingMedium
-            visible: page.hasPending
+            spacing: 0
+
+            PageHeader {
+                title: page.sessionName !== "" ? page.sessionName : qsTr("Session")
+                description: page.errorText !== "" ? qsTr("Connection error")
+                          : (page.hasPending ? qsTr("Awaiting approval")
+                          : (page.sessionActive ? qsTr("Agent active")
+                          : (page.loading ? qsTr("Connecting…") : qsTr("Idle"))))
+                IconButton {
+                    icon.source: "image://theme/icon-m-back"
+                    onClicked: pageStack.pop()
+                }
+            }
+
+            Item {
+                id: banner
+                width: parent.width
+                height: page.hasPending ? bannerCol.implicitHeight + Theme.paddingMedium * 2 : 0
+                visible: page.hasPending
 
             Rectangle {
                 anchors.fill: parent
@@ -113,6 +251,7 @@ Page {
                     leftMargin: Theme.horizontalPageMargin
                     rightMargin: Theme.horizontalPageMargin
                 }
+                width: parent.width - 2 * Theme.horizontalPageMargin
                 spacing: 2
 
                 Label {
@@ -134,61 +273,213 @@ Page {
                     width: parent.width
                 }
             }
+            }
         }
 
-        delegate: ListItem {
+        ViewPlaceholder {
+            visible: entryModel.count === 0
+            text: page.errorText !== "" ? page.errorText
+                                       : (page.loading ? qsTr("Loading…") : qsTr("Empty session"))
+        }
+
+        delegate: Item {
+            id: delegate
             width: list.width
-            contentHeight: entryCol.implicitHeight + Theme.paddingLarge * 2
+            height: (model.view === "user" || model.view === "assistant")
+                   ? (model.view === "user" ? userBubble.implicitHeight : assistBubble.implicitHeight) + 10
+                   : (model.view === "thinking" || model.view === "toolgroup")
+                     ? card.implicitHeight + 8
+                     : lineItem.implicitHeight + 10
 
-            Column {
-                id: entryCol
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    leftMargin: Theme.horizontalPageMargin
-                    rightMargin: Theme.horizontalPageMargin
-                    verticalCenter: parent.verticalCenter
+            property real mside: 14
+
+            // ---------- user bubble (right) ----------
+            Item {
+                id: userBubble
+                visible: model.view === "user"
+                width: parent.width - 2 * parent.mside
+                anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
+                implicitHeight: uText.implicitHeight + 24
+                height: implicitHeight
+
+                Rectangle {
+                    anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
+                    width: Math.min(uText.width + 28, parent.width)
+                    radius: 18
+                    color: page.userBubbleColor
                 }
-                spacing: 2
-
-                Label {
-                    id: roleLabel
-                    text: roleText()
-                    visible: roleLabel.text !== ""
-                    elide: Text.ElideRight
-                    width: parent.width
-                    color: roleColor()
-                }
-
-                Label {
+                Text {
+                    id: uText
+                    anchors { right: parent.right; rightMargin: 14; top: parent.top; topMargin: 12 }
+                    width: Math.min(uText.implicitWidth, parent.width - 28)
                     text: model.text
-                    visible: model.text !== ""
+                    color: page.fgColor
+                    font.pixelSize: 16
+                    font.family: "Sans Serif"
                     wrapMode: Text.Wrap
+                }
+            }
+
+            // ---------- assistant bubble (left) ----------
+            Item {
+                id: assistBubble
+                visible: model.view === "assistant"
+                width: parent.width - 2 * parent.mside
+                anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
+                implicitHeight: aText.implicitHeight + 24
+                height: implicitHeight
+
+                Rectangle {
+                    anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                    width: Math.min(aText.width + 28, parent.width)
+                    radius: 18
+                    color: page.assistBubbleColor
+                }
+                Text {
+                    id: aText
+                    anchors { left: parent.left; leftMargin: 14; top: parent.top; topMargin: 12 }
+                    width: Math.min(aText.implicitWidth, parent.width - 28)
+                    text: model.text
+                    color: page.fgColor
+                    font.pixelSize: 16
+                    font.family: "Sans Serif"
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            // ---------- thinking / toolgroup card ----------
+            Item {
+                id: card
+                visible: model.view === "thinking" || model.view === "toolgroup"
+                width: parent.width - 2 * parent.mside
+                anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
+                property int cardPad: 10
+                property bool cardExpanded: model.expanded === true
+                implicitHeight: headerRow.implicitHeight + cardPad * 2
+                               + (cardExpanded ? (cardContent.implicitHeight + cardPad
+                                                  + collapseRow.implicitHeight + cardPad) : 0)
+                height: implicitHeight
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 10
+                    color: page.cardBgColor
+                    border.color: page.cardBorderColor
+                    border.width: 1
+                }
+
+                Item {
+                    id: headerRow
+                    anchors {
+                        left: parent.left
+                        top: parent.top
+                        leftMargin: parent.cardPad
+                        topMargin: parent.cardPad
+                    }
+                    width: parent.width - 2 * parent.cardPad
+                    implicitHeight: headerLabel.implicitHeight + 4
+                    height: implicitHeight
+
+                    Label {
+                        id: headerLabel
+                        anchors.left: parent.left
+                        width: parent.width - 28
+                        // Qt 5.6: qsTr() returns a QVariant — bare qsTr and string
+                        // concatenation are safe, but calling methods on it (or
+                        // wrapping in String()) throws and the label renders empty.
+                        // Uppercase literals + concatenation = the proven pattern.
+                        text: model.view === "thinking"
+                             ? qsTr("THINKING")
+                             : (model.count === 1 ? qsTr("1 TOOL CALL")
+                                                  : model.count + " " + qsTr("TOOL CALLS"))
+                        color: page.mutedColor
+                        font.pixelSize: 12
+                        font.letterSpacing: 0.03
+                        elide: Text.ElideRight
+                    }
+
+                    Label {
+                        anchors.right: parent.right
+                        text: card.cardExpanded ? "▴" : "▾"
+                        color: page.mutedColor
+                        font.pixelSize: 12
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onPressed: {
+                            card.cardExpanded = !card.cardExpanded
+                            page.setExpanded(model.sig, card.cardExpanded)
+                        }
+                    }
+                }
+
+                Text {
+                    id: cardContent
+                    visible: card.cardExpanded && model.text !== ""
+                    anchors {
+                        left: parent.left
+                        top: headerRow.bottom
+                        topMargin: parent.cardPad
+                        leftMargin: parent.cardPad
+                    }
+                    width: parent.width - 2 * parent.cardPad
+                    text: model.text
+                    color: page.mutedColor
+                    font.pixelSize: 13
+                    font.family: "Sans Serif"
+                    wrapMode: Text.Wrap
+                }
+
+                Item {
+                    id: collapseRow
+                    visible: card.cardExpanded
+                    anchors {
+                        right: parent.right
+                        top: cardContent.visible ? cardContent.bottom : headerRow.bottom
+                        topMargin: parent.cardPad
+                        rightMargin: parent.cardPad
+                    }
+                    implicitHeight: collapseLabel.implicitHeight
+                    height: implicitHeight
+                    width: collapseLabel.implicitWidth
+
+                    Label {
+                        id: collapseLabel
+                        text: qsTr("Collapse")
+                        color: page.brandColor
+                        font.pixelSize: 13
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onPressed: {
+                            card.cardExpanded = false
+                            page.setExpanded(model.sig, false)
+                        }
+                    }
+                }
+            }
+
+            // ---------- system / approval line ----------
+            Item {
+                id: lineItem
+                visible: model.view === "line"
+                width: parent.width - 2 * parent.mside
+                anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
+                implicitHeight: lineText.implicitHeight + 4
+                height: implicitHeight
+
+                Text {
+                    id: lineText
+                    anchors.horizontalCenter: parent.horizontalCenter
                     width: parent.width
-                    color: (model.kind === "tool_result" || model.kind === "system")
-                           ? Theme.secondaryColor : Theme.primaryColor
-                }
-
-                function roleText() {
-                    if (model.kind === "user")
-                        return qsTr("You")
-                    if (model.kind === "assistant")
-                        return qsTr("Bionic")
-                    if (model.kind === "tool_call")
-                        return qsTr("Tool") + (model.tool !== "" ? ": " + model.tool : "")
-                    if (model.kind === "tool_result")
-                        return qsTr("Result")
-                    if (model.kind === "approval")
-                        return qsTr("Approval")
-                    return ""
-                }
-
-                function roleColor() {
-                    if (model.kind === "user")
-                        return Theme.secondaryHighlightColor
-                    if (model.kind === "assistant" || model.kind === "approval")
-                        return Theme.highlightColor
-                    return Theme.secondaryColor
+                    text: model.text
+                    color: model.highlight ? page.brandColor : page.mutedColor
+                    font.pixelSize: 12
+                    font.family: "Sans Serif"
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                 }
             }
         }

@@ -191,31 +191,45 @@ function normalizeEntry(entry, answeredRequests) {
     const msg = entry.message || {};
     const role = msg.role;
     const parts = Array.isArray(msg.parts) ? msg.parts : [];
-    const texts = [];
-    let toolCall = null;
+    const out = [];
+    const pushText = (text, kind) => { if (text) out.push({ kind, text: trunc(text) }); };
+
+    // User messages: one bubble from all text parts (+ image placeholders).
+    if (role === 'user') {
+      const texts = parts.filter((p) => p && p.type === 'text' && p.text)
+                         .map((p) => String(p.text));
+      const imgs = parts.filter((p) => p && p.type === 'image').length;
+      if (imgs > 0) texts.push('[' + imgs + ' image' + (imgs > 1 ? 's' : '') + ']');
+      pushText(texts.join('\n'), 'user');
+      return out.length > 0 ? out : null;
+    }
+
+    // Assistant / tool messages: emit parts in order. Real part types are
+    // 'reasoning' (thinking), 'text', 'toolCallRequest', 'toolCallResult'.
     for (const p of parts) {
       if (!p) continue;
-      if (p.type === 'text' && p.text) texts.push(String(p.text));
-      else if (p.type === 'toolCall') {
-        toolCall = {
-          tool: p.name || p.toolId || p.toolName || 'tool',
-          args: trunc(JSON.stringify(p.args ?? p.arguments ?? p.input ?? {})),
-        };
+      if (p.type === 'reasoning' && p.text) {
+        pushText(String(p.text), 'reasoning');
+      }
+      else if (p.type === 'text' && p.text) {
+        pushText(String(p.text), role === 'assistant' ? 'assistant' : 'system');
+      }
+      else if (p.type === 'toolCallRequest' || p.type === 'toolCall') {
+        const argsRaw = p.parameters ?? p.args ?? p.arguments ?? p.input ?? {};
+        out.push({
+          kind: 'tool_call',
+          tool: p.name || p.toolName || 'tool',
+          args: trunc(JSON.stringify(argsRaw, null, 2)),
+        });
       }
       else if (p.type === 'toolCallResult') {
-        const r = (p.result || []).map((x) => (x?.type === 'text' ? x.text : JSON.stringify(x))).join('\n');
-        if (r) texts.push(r);
+        const r = (p.result || [])
+          .map((x) => (x && x.type === 'text' ? x.text : JSON.stringify(x)))
+          .join('\n');
+        pushText(r, role === 'tool' ? 'tool_result' : 'system');
       }
     }
-    const text = trunc(texts.join('\n'));
-    if (role === 'user') return text ? { kind: 'user', text } : null;
-    if (role === 'assistant') {
-      if (toolCall && !text) return { kind: 'tool_call', ...toolCall };
-      if (toolCall && text) return { kind: 'assistant', text, tool: toolCall.tool, args: toolCall.args };
-      return text ? { kind: 'assistant', text } : null;
-    }
-    if (role === 'tool') return text ? { kind: 'tool_result', text } : null;
-    return text ? { kind: 'system', text } : null;
+    return out.length > 0 ? out : null;
   }
   if (t === 'elicitationRequest') {
     const choices = (entry.steps || []).flatMap((s) => (s?.choices || []).map((c) => ({ value: c.value, label: renderLoc(c.label) || String(c.value) })));
@@ -251,8 +265,10 @@ function transcript(db, headId, limit = 100) {
   for (const e of chain) if (e?.type === 'elicitationResponse' && e.requestId) answered.add(e.requestId);
   const out = [];
   for (const e of chain) {
-    const n = normalizeEntry(e, answered);
-    if (n) out.push(n);
+    const ns = normalizeEntry(e, answered);
+    if (!ns) continue;
+    if (Array.isArray(ns)) { for (const n of ns) out.push(n); }
+    else out.push(ns);
   }
   out.reverse(); // oldest → newest
   const entries = out.slice(-Math.max(1, limit));
@@ -309,6 +325,9 @@ function sendJson(res, code, obj) {
 
 const server = http.createServer((req, res) => {
   const remote = req.socket.remoteAddress || '';
+  console.log(new Date().toISOString(), "REQ", remote, req.method, req.url,
+    "auth=" + (req.headers['authorization'] ? 'yes' : 'no'),
+    "authlen=" + ((req.headers['authorization']||'').length));
   if (!ipAllowed(remote)) return sendJson(res, 403, { error: 'source address not allowed' });
   const url = new URL(req.url, 'http://localhost');
   const auth = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
