@@ -69,9 +69,9 @@ Page {
         anchors.fill: parent
         model: sessionModel
 
-        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
-        // As a plain Page child it floats top-right WITHOUT reserving space,
-        // so the first list item renders on top of it. (QML-GOTCHAS.md)
+        // `header` is a real SilicaListView (ListView) property — the header
+        // reserves space at the top of the content. (Flickable has no such
+        // property; assigning `header:` there kills page loading.)
         header: PageHeader {
             title: page.projectName !== "" ? page.projectName : qsTr("Sessions")
             description: page.errorText !== "" ? qsTr("Connection error")

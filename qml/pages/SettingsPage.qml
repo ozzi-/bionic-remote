@@ -32,14 +32,20 @@ Page {
     }
 
     SilicaFlickable {
+        id: flick
         anchors.fill: parent
         contentWidth: width
-        contentHeight: col.implicitHeight + Theme.paddingLarge
+        contentHeight: header.height + col.implicitHeight + Theme.paddingLarge
 
-        // SFOS 5.1 layout contract: PageHeader MUST live in the view header.
-        // As a plain Page child it floats top-right WITHOUT reserving space.
-        // (QML-GOTCHAS.md)
-        header: PageHeader {
+        // SilicaFlickable (Flickable) has NO `header` property — assigning
+        // one is a hard QML error ("Cannot assign to non-existent property
+        // header") that aborts page loading ("Could not load page").
+        // Official Silica pattern (see Silica's own ColorPickerPage.qml):
+        // the header is a plain child item, the body anchors below it, and
+        // contentHeight = header.height + body.
+        // (Only SilicaListView/ListView has a real `header` property.)
+        PageHeader {
+            id: header
             title: qsTr("Settings")
             IconButton {
                 icon.source: "image://theme/icon-m-back"
@@ -49,9 +55,15 @@ Page {
 
         Column {
             id: col
-            x: Theme.horizontalPageMargin
+            anchors {
+                top: header.bottom
+                topMargin: Theme.paddingMedium
+                left: parent.left
+                leftMargin: Theme.horizontalPageMargin
+                right: parent.right
+                rightMargin: Theme.horizontalPageMargin
+            }
             width: parent.width - 2 * Theme.horizontalPageMargin
-            y: Theme.paddingMedium
             spacing: Theme.paddingMedium
 
             Label {
@@ -61,7 +73,9 @@ Page {
             TextField {
                 text: page.serverInput
                 onTextChanged: page.serverInput = text
-                inputMethodHints: Qt.ImhUrlText
+                // NOTE: no inputMethodHints here — on SFOS 5.x (Qt 5.6) the QML
+                // `Qt` object only exposes Qt.ImhNone / Qt.ImhHiddenText; any
+                // other Qt.Imh* value is undefined (non-fatal warning, lost hint).
             }
 
             Label {

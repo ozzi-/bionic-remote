@@ -243,9 +243,9 @@ Page {
         clip: true
         model: entryModel
 
-        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
-        // As a plain Page child it floats top-right WITHOUT reserving space,
-        // so the first entry renders on top of it. (QML-GOTCHAS.md)
+        // `header` is a real SilicaListView (ListView) property — the header
+        // Column reserves space at the top of the content. (Flickable has no
+        // such property; assigning `header:` there kills page loading.)
         header: Column {
             width: list.width
             spacing: 0

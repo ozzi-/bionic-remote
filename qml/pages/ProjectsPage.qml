@@ -78,17 +78,19 @@ Page {
         anchors.fill: parent
         model: projectModel
 
-        // SFOS 5.1 layout contract: PageHeader MUST live in the list header.
-        // As a plain Page child it floats top-right WITHOUT reserving space,
-        // so the first list item renders on top of it. (QML-GOTCHAS.md)
+        // `header` is a REAL property of SilicaListView (ListView, Qt 5.6):
+        // the PageHeader becomes the view's header — it reserves space at the
+        // top of the content, so the first row renders below it (verified on
+        // 5.1 emulator + 5.2 phone; same pattern as Jolla's FileManager).
+        // NOTE: keep the header free of MenuItems — they stay visible at all
+        // times (the header is content), which looks like a stuck pulldown.
+        // Settings lives in the PullDownMenu below.
+        // IMPORTANT: SilicaFlickable (Flickable) has NO `header` property —
+        // assigning one there is a hard error that kills page loading.
         header: PageHeader {
             title: qsTr("Projects")
             description: page.connectionError !== "" ? qsTr("Connection error")
                                                      : (page.loading ? qsTr("Connecting…") : qsTr("Connected"))
-            MenuItem {
-                text: qsTr("Settings")
-                onClicked: pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
-            }
         }
 
         ViewPlaceholder {
