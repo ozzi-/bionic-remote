@@ -10,6 +10,14 @@
 //   BRIDGE_TOKEN_FILE  (default ~/.config/bionic-remote/token)
 //   BRIDGE_TOKEN       (inline token; overrides the file)
 //   BIONIC_HOME        (default ~/.lmstudio)
+//   BRIDGE_BIND        listen address (default 0.0.0.0; set to the Tailscale
+//                      interface IP, e.g. 100.x.y.z, to serve only on the
+//                      encrypted tailnet)
+//   BRIDGE_ALLOWED_CIDRS  comma-separated allowlist, e.g.
+//                      "loopback,tailscale-v6,100.64.0.0/10". Special tokens:
+//                      loopback (always allowed), tailscale-v6 (fd7a::/8).
+//                      When UNSET, the permissive default applies (loopback +
+//                      100.64/10 + fd7a::/8 + 10/8 + 172.16/12 + 192.168/16).
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -19,6 +27,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const PORT = Number(process.env.BRIDGE_PORT || 8443);
+const BIND_ADDR = process.env.BRIDGE_BIND || '0.0.0.0';
 const BIONIC_HOME = process.env.BIONIC_HOME || path.join(os.homedir(), '.lmstudio');
 const BIONIC_APP = path.join(BIONIC_HOME, 'apps', 'bionic');
 const REGISTRY = path.join(BIONIC_APP, '.internal', 'projects-registry.json');
@@ -52,18 +61,46 @@ function tokenValid(provided) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// Optional operator allowlist (see BRIDGE_ALLOWED_CIDRS above). Loopback is
+// always allowed. When the env var is unset, the permissive default below
+// applies so existing setups keep working.
+let STRICT_ALLOWED = null;
+if (process.env.BRIDGE_ALLOWED_CIDRS) {
+  const cidrs = [];
+  let tailscaleV6 = false;
+  for (const raw of process.env.BRIDGE_ALLOWED_CIDRS.split(',')) {
+    const e = raw.trim();
+    if (!e || e.toLowerCase() === 'loopback') continue;
+    if (e.toLowerCase() === 'tailscale-v6') { tailscaleV6 = true; continue; }
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(e);
+    if (m) cidrs.push([Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])]);
+    else log('WARN: ignoring unknown BRIDGE_ALLOWED_CIDRS entry:', e);
+  }
+  STRICT_ALLOWED = { cidrs, tailscaleV6 };
+  log('allowlist (strict):', JSON.stringify(STRICT_ALLOWED));
+}
+
 function ipAllowed(remote) {
   let ip = (remote || '').replace(/^::ffff:/, '');
   if (ip === '127.0.0.1' || ip === '::1') return true;
-  // Tailscale IPv6 (fd7a::/8)
+  if (STRICT_ALLOWED) {
+    if (STRICT_ALLOWED.tailscaleV6 && /^fd7a:/i.test(ip)) return true;
+    const m = ip.split('.').map(Number);
+    if (m.length !== 4 || m.some((n) => Number.isNaN(n))) return false;
+    const num = (m[0] << 24 | m[1] << 16 | m[2] << 8 | m[3]) >>> 0;
+    return STRICT_ALLOWED.cidrs.some(([a, b, c, d, mask]) => {
+      const base = (a << 24 | b << 16 | c << 8 | d) >>> 0;
+      const shift = 32 - mask;
+      return (num >>> shift) === (base >>> shift);
+    });
+  }
+  // Default (permissive, pre-existing behaviour):
+  // Tailscale IPv6 (fd7a::/8) + common private ranges + Tailscale CGNAT.
   if (/^fd7a:/i.test(ip)) return true;
-  // IPv4 CIDR checks
   const m = ip.split('.').map(Number);
   if (m.length !== 4 || m.some((n) => Number.isNaN(n))) return false;
   const inCidr = (base, mask) => {
     const b = base.split('.').map(Number);
-    let maskVal = 0;
-    for (let i = 0; i < mask; i++) maskVal = (maskVal << 1) | 1;
     const shift = 32 - mask;
     return ((m[0] << 24 | m[1] << 16 | m[2] << 8 | m[3]) >>> shift) ===
            ((b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3]) >>> shift);
@@ -419,6 +456,6 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  log(`bionic-remote-bridge v${VERSION} listening on 0.0.0.0:${PORT} (bionic home: ${BIONIC_HOME})`);
+server.listen(PORT, BIND_ADDR, () => {
+  log(`bionic-remote-bridge v${VERSION} listening on ${BIND_ADDR}:${PORT} (bionic home: ${BIONIC_HOME})`);
 });

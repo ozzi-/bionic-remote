@@ -14,8 +14,10 @@ Client::Client(QObject *parent)
     , m_manager(new QNetworkAccessManager(this))
 {
     QSettings settings;
-    m_serverUrl = settings.value(QStringLiteral("serverUrl"),
-                                 QStringLiteral("http://192.168.178.32:8443")).toString();
+    // No default URL: the bridge host differs per user (LAN IP or Tailscale
+    // IP). An empty URL makes the app report "No server configured" until the
+    // user enters one in Settings — and keeps no personal IP in the binary.
+    m_serverUrl = settings.value(QStringLiteral("serverUrl")).toString();
     m_token = settings.value(QStringLiteral("token")).toString();
     qInfo().noquote() << QStringLiteral("[BRC] settings file: %1")
                        .arg(settings.fileName().toLocal8Bit().constData());
@@ -107,10 +109,12 @@ void Client::doFetch(Endpoint endpoint, const QString &path)
                 error = tr("HTTP %1").arg(status);
         }
 
-        qInfo().noquote() << QStringLiteral("[BRC] done %1 status=%2 err=%3 bodyHead=%4")
+        // NOTE: deliberately do NOT log the response body — it contains
+        // session names / transcript content. (Error text is extracted and
+        // shown to the UI separately.)
+        qInfo().noquote() << QStringLiteral("[BRC] done %1 status=%2 err=%3")
                           .arg(endpoint).arg(status)
-                          .arg(reply->errorString())
-                          .arg(QString::fromUtf8(body.left(160)));
+                          .arg(reply->errorString());
         reply->deleteLater();
         emitResult(endpoint, ok, QString::fromUtf8(body), error);
     });

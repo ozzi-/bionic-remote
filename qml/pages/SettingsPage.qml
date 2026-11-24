@@ -85,6 +85,9 @@ Page {
             TextField {
                 text: page.tokenInput
                 onTextChanged: page.tokenInput = text
+                // Mask the token. SFOS 5.x (Qt 5.6): use echoMode (the Qt 5.14+
+                // 'password' property does not exist on this stack).
+                echoMode: TextInput.Password
             }
 
             Button {
@@ -116,7 +119,7 @@ Page {
             }
 
             Label {
-                text: qsTr("The bridge runs on the Arch machine as the bionic-remote user service (default http://192.168.178.32:8443).")
+                text: qsTr("The bridge runs on the machine where Bionic runs (default port 8443), e.g. its LAN or Tailscale IP: http://<bridge-host>:8443")
                 color: Theme.secondaryColor
                 wrapMode: Text.Wrap
                 width: parent.width
