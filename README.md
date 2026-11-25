@@ -57,6 +57,10 @@ Description=bionic-remote bridge (Bionic session API for phone app)
 After=network.target
 
 [Service]
+# Serve only on the Tailscale network. Get the PC's tailnet IP with: tailscale ip -4
+# (Remove the two BRIDGE_BIND / BRIDGE_ALLOWED_CIDRS lines to serve on the LAN instead.)
+Environment=BRIDGE_BIND=<PC_TAILSCALE_IP>
+Environment=BRIDGE_ALLOWED_CIDRS=loopback,100.64.0.0/10,tailscale-v6
 Environment=BRIDGE_PORT=8443
 Environment=BRIDGE_TOKEN_FILE=%h/.config/bionic-remote/token
 ExecStart=/usr/bin/node --no-warnings %h/.local/share/bionic-remote/bridge.mjs
@@ -74,8 +78,9 @@ systemctl --user status bionic-remote
 Verify (replace `TOKEN` with the contents of your token file):
 
 ```sh
+# NOTE: with the Tailscale-only bind above, use the PC's tailnet IP, not 127.0.0.1.
 curl -s -H "Authorization: Bearer $(cat ~/.config/bionic-remote/token)" \
-     http://127.0.0.1:8443/v1/health
+     http://<PC_TAILSCALE_IP>:8443/v1/health
 # -> {"ok":true,"name":"bionic-remote-bridge",...}
 ```
 
@@ -109,8 +114,10 @@ devel-su rpm -Uvh ~/harbour-bionic-remote-0.1.0-10.aarch64.rpm
 ### 3. Connect the app to the bridge
 
 **Easiest:** open the app → pull down → **Settings** → enter the bridge URL
-(e.g. `http://<bridge-host>:8443` — the PC's LAN IP, or its Tailscale IP if
-you use Tailscale) and the token (from step 1b), then *Test connection*.
+(`http://<PC_TAILSCALE_IP>:8443` — your PC's Tailscale IP from `tailscale ip -4`,
+which is the address the bridge is bound to) and the token (from step 1b),
+then *Test connection*. (If you served the bridge on the LAN instead, use the
+PC's LAN IP here.)
 
 **Programmatically** (sets both values at once). Close the app first —
 QSettings rewrites the file on exit and would clobber your values:
@@ -139,19 +146,22 @@ rm ~/bionic-token
 - **The bridge** reads its token from `~/.config/bionic-remote/token`
   (keep it `600`); it compares tokens in constant time and rejects unknown
   source IPs.
-- **Transport is plain HTTP.** On a trusted home network the 192-bit random
-  token is the main protection. For anything stronger, install Tailscale on
-  the PC and the phone, point the app at the PC's `100.x` Tailscale IP, and
-  harden the bridge:
+- **Transport: Tailscale (recommended).** The API is plain HTTP, so the
+  192-bit token is the wire protection. The recommended setup installs Tailscale
+  on the PC and the phone, binds the bridge to the PC's tailnet IP, and
+  allowlists only tailnet sources — the phone then talks to the bridge over the
+  encrypted tailnet and the LAN port is not exposed:
 
   ```sh
-  # in bionic-remote.service
+  # in bionic-remote.service  (PC tailnet IP from: tailscale ip -4)
   Environment=BRIDGE_BIND=<PC_TAILSCALE_IP>
-  Environment=BRIDGE_ALLOWED_CIDRS=loopback,tailscale-v6
+  Environment=BRIDGE_ALLOWED_CIDRS=loopback,100.64.0.0/10,tailscale-v6
   ```
 
-  then the bridge listens only on the encrypted tailnet and only accepts
-  tailnet sources.
+  `100.64.0.0/10` covers Tailscale v4 (your phone's `100.x` peer),
+  `tailscale-v6` covers `fd7a::/8`, and `loopback` is for local testing. The
+  bridge listens only on the encrypted tailnet and only accepts tailnet
+  sources.
 - The bridge is **read-only** against Bionic's data (opens SQLite stores
   `readOnly`, all queries parameterized, project/session IDs must match the
   registry — no path traversal).
