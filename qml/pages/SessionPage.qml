@@ -60,6 +60,18 @@ Page {
 
     // ---------------- helpers ----------------
 
+    function formatDuration(ms) {
+        var s = Math.floor(Number(ms || 0) / 1000)
+        var h = Math.floor(s / 3600)
+        var m = Math.floor((s % 3600) / 60)
+        var sec = s % 60
+        if (h > 0)
+            return h + "h " + m + "m"
+        if (m > 0)
+            return m + "m " + sec + "s"
+        return sec + "s"
+    }
+
     function setExpanded(sig, value) {
         if (sig === "" || sig === undefined)
             return
@@ -131,7 +143,7 @@ Page {
                 continue
             }
             if (kind === "user") {
-                items.push({ "view": "user", "text": e.text || "" })
+                items.push({ "view": "user", "text": e.text || "", "html": e.html || "" })
                 i++
                 continue
             }
@@ -151,8 +163,20 @@ Page {
                     items.push({ "view": "thinking", "text": lead[r],
                                  "sig": "th|" + i + "|" + r + "|" + String(lead[r]).slice(0, 32) })
                 }
-                items.push({ "view": "assistant", "text": e.text || "" })
+                items.push({ "view": "assistant", "text": e.text || "", "html": e.html || "" })
                 i = j
+                continue
+            }
+            if (kind === "compacted") {
+                // Expandable card: summary text (markdown) + "worked for" line.
+                items.push({
+                    "view": "compacted",
+                    "text": e.summary || "",
+                    "html": e.summaryHtml || "",
+                    "subline": e.workedForMs ? formatDuration(e.workedForMs) : "",
+                    "sig": "cp|" + i + "|" + String(e.summary || "").slice(0, 32)
+                })
+                i++
                 continue
             }
             if (kind === "approval") {
@@ -219,6 +243,8 @@ Page {
                 entryModel.append({
                     "view": it.view,
                     "text": it.text || "",
+                    "html": it.html || "",
+                    "subline": it.subline || "",
                     "count": it.count || 0,
                     "sig": it.sig || "",
                     "highlight": it.highlight === true,
@@ -320,7 +346,8 @@ Page {
             width: list.width
             height: (model.view === "user" || model.view === "assistant")
                    ? (model.view === "user" ? userBubble.implicitHeight : assistBubble.implicitHeight) + 10
-                   : (model.view === "thinking" || model.view === "toolgroup")
+                   : (model.view === "thinking" || model.view === "toolgroup"
+                      || model.view === "compacted")
                      ? card.implicitHeight + 8
                      : lineItem.implicitHeight + 10
 
@@ -345,7 +372,9 @@ Page {
                     id: uText
                     anchors { right: parent.right; rightMargin: 14; top: parent.top; topMargin: 12 }
                     width: Math.min(uText.implicitWidth, parent.width - 28)
-                    text: model.text
+                    // Markdown rendered by the bridge as Qt-RichText-compatible HTML.
+                    text: model.html !== "" ? model.html : model.text
+                    textFormat: model.html !== "" ? Text.RichText : Text.PlainText
                     color: page.userTextColor
                     font.pixelSize: Theme.fontSizeLarge
                     wrapMode: Text.Wrap
@@ -371,7 +400,9 @@ Page {
                     id: aText
                     anchors { left: parent.left; leftMargin: 14; top: parent.top; topMargin: 12 }
                     width: Math.min(aText.implicitWidth, parent.width - 28)
-                    text: model.text
+                    // Markdown rendered by the bridge as Qt-RichText-compatible HTML.
+                    text: model.html !== "" ? model.html : model.text
+                    textFormat: model.html !== "" ? Text.RichText : Text.PlainText
                     color: page.fgColor
                     font.pixelSize: Theme.fontSizeLarge
                     wrapMode: Text.Wrap
@@ -381,7 +412,7 @@ Page {
             // ---------- thinking / toolgroup card ----------
             Item {
                 id: card
-                visible: model.view === "thinking" || model.view === "toolgroup"
+                visible: model.view === "thinking" || model.view === "toolgroup" || model.view === "compacted"
                 width: parent.width - 2 * parent.mside
                 anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
                 property int cardPad: 10
@@ -409,6 +440,7 @@ Page {
                     }
                     width: parent.width - 2 * parent.cardPad
                     implicitHeight: headerLabel.implicitHeight + 4
+                                   + (sublineLabel.visible ? sublineLabel.implicitHeight + 2 : 0)
                     height: implicitHeight
 
                     Label {
@@ -421,11 +453,23 @@ Page {
                         // Uppercase literals + concatenation = the proven pattern.
                         text: model.view === "thinking"
                              ? qsTr("THINKING")
+                             : (model.view === "compacted" ? qsTr("COMPACTED")
                              : (model.count === 1 ? qsTr("1 TOOL CALL")
-                                                  : model.count + " " + qsTr("TOOL CALLS"))
+                                                  : model.count + " " + qsTr("TOOL CALLS")))
                         color: page.mutedColor
                         font.pixelSize: Theme.fontSizeSmall
                         font.letterSpacing: 0.03
+                        elide: Text.ElideRight
+                    }
+
+                    Label {
+                        id: sublineLabel
+                        anchors { left: parent.left; top: headerLabel.bottom; topMargin: 2 }
+                        width: parent.width - 28
+                        text: model.subline !== "" ? qsTr("Worked for ") + model.subline : ""
+                        visible: model.subline !== ""
+                        color: page.mutedColor
+                        font.pixelSize: Theme.fontSizeSmall
                         elide: Text.ElideRight
                     }
 
@@ -436,18 +480,11 @@ Page {
                         font.pixelSize: Theme.fontSizeSmall
                     }
 
-                    MouseArea {
-                        anchors.fill: parent
-                        onPressed: {
-                            card.cardExpanded = !card.cardExpanded
-                            page.setExpanded(model.sig, card.cardExpanded)
-                        }
-                    }
                 }
 
                 Text {
                     id: cardContent
-                    visible: card.cardExpanded && model.text !== ""
+                    visible: card.cardExpanded && (model.text !== "" || model.html !== "")
                     anchors {
                         left: parent.left
                         top: headerRow.bottom
@@ -455,8 +492,11 @@ Page {
                         leftMargin: parent.cardPad
                     }
                     width: parent.width - 2 * parent.cardPad
-                    text: model.text
-                    color: page.mutedColor
+                    // Compaction summaries are real content the user came to read →
+                    // full foreground color; thinking/tool output stays muted.
+                    text: model.html !== "" ? model.html : model.text
+                    textFormat: model.html !== "" ? Text.RichText : Text.PlainText
+                    color: model.view === "compacted" ? page.fgColor : page.mutedColor
                     font.pixelSize: Theme.fontSizeMedium
                     wrapMode: Text.Wrap
                 }
@@ -480,13 +520,19 @@ Page {
                         color: page.brandColor
                         font.pixelSize: Theme.fontSizeMedium
                     }
+                }
 
-                    MouseArea {
-                        anchors.fill: parent
-                        onPressed: {
-                            card.cardExpanded = false
-                            page.setExpanded(model.sig, false)
-                        }
+                // The WHOLE card is the tap target: one MouseArea on the card
+                // item, declared LAST so it is topmost in z-order (the pattern
+                // verified to receive touches on this stack — a MouseArea
+                // nested in the headerRow sub-item did not). Press toggles
+                // expand/collapse; the "Collapse" label above is a pure
+                // affordance (the card-level area handles the tap).
+                MouseArea {
+                    anchors.fill: parent
+                    onPressed: {
+                        card.cardExpanded = !card.cardExpanded
+                        page.setExpanded(model.sig, card.cardExpanded)
                     }
                 }
             }

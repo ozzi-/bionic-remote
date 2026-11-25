@@ -37,6 +37,8 @@ const VERSION = '0.1.0';
 
 const TEXT_LIMIT = 6000;
 const WALK_LIMIT = 5000;
+const SUMMARY_LIMIT = 32000;   // compaction summaries can be long docs; allow more
+const SUB_WALK_LIMIT = 600;   // entries to walk inside a compaction sub-session
 const ACTIVE_WINDOW_MS = 20000;
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
@@ -187,8 +189,110 @@ function trunc(s) {
   return s.length > TEXT_LIMIT ? s.slice(0, TEXT_LIMIT) + ' …' : s;
 }
 
+function truncSummary(s) {
+  s = String(s ?? '');
+  return s.length > SUMMARY_LIMIT ? s.slice(0, SUMMARY_LIMIT) + ' …' : s;
+}
+
+// ---------- markdown → Qt RichText HTML ----------
+// Qt 5.6 / QuickText RichText is a subset of HTML; we stick to tags its
+// default stylesheet understands (b, i, s, tt, ul/ol/li, blockquote, a).
+// The body default stylesheet applies white-space: pre-wrap, so source
+// line breaks are preserved. Fenced code uses <tt> (monospace + wrapping)
+// instead of <pre> because <pre> lines do not wrap and would overflow
+// narrow mobile bubbles. Degraded gracefully on truncated/unclosed
+// markers (text is truncated upstream before conversion).
+
+function htmlEsc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function inlineMd(s) {
+  // s is already HTML-escaped.
+  // 1) Protect inline code spans from the other transforms.
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => {
+    codes.push('<tt>' + c + '</tt>');
+    return '\u0001' + (codes.length - 1) + '\u0002';
+  });
+  // 2) Bold, 3) italic, 4) strikethrough.
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  s = s.replace(/__([^_]+)__/g, '<b>$1</b>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
+  s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>');
+  // 5) Links (http/https only).
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  // 6) Restore code spans.
+  s = s.replace(/\u0001(\d+)\u0002/g, (m, i) => codes[Number(i)]);
+  return s;
+}
+
+function blockMd(s) {
+  // s is RAW text. Lines are classified first (on unescaped text, so a
+  // leading ">" blockquote marker still matches), then each line's content
+  // is escaped + inlined. Chunks are joined with newlines so source line
+  // breaks survive (Qt's body pre-wrap renders them).
+  const lines = s.split('\n');
+  const chunks = [];
+  let curList = null;
+  const flushList = () => {
+    if (curList) {
+      chunks.push('<' + curList.type + '>' + curList.items.map((i) => '<li>' + i + '</li>').join('') + '</' + curList.type + '>');
+      curList = null;
+    }
+  };
+  for (const line of lines) {
+    const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const hd = /^(#{1,6})\s+(.*)$/.exec(line);
+    const bq = /^\s*>\s?(.*)$/.exec(line);
+    if (ul) {
+      if (!curList || curList.type !== 'ul') { flushList(); curList = { type: 'ul', items: [] }; }
+      curList.items.push(inlineMd(htmlEsc(ul[1])));
+      continue;
+    }
+    if (ol) {
+      if (!curList || curList.type !== 'ol') { flushList(); curList = { type: 'ol', items: [] }; }
+      curList.items.push(inlineMd(htmlEsc(ol[1])));
+      continue;
+    }
+    flushList();
+    if (hd) chunks.push('<b>' + inlineMd(htmlEsc(hd[2])) + '</b>');
+    else if (bq) chunks.push('<blockquote>' + inlineMd(htmlEsc(bq[1])) + '</blockquote>');
+    else chunks.push(line.trim() === '' ? '' : inlineMd(htmlEsc(line)));
+  }
+  flushList();
+  return chunks.join('\n');
+}
+
+function mdToHtml(md) {
+  md = String(md ?? '');
+  // Split off fenced code blocks first.
+  const segments = [];
+  let rest = md;
+  const fenceRe = /^(```|~~~)/m;
+  while (fenceRe.test(rest)) {
+    const m = rest.match(fenceRe);
+    const fence = m[1];
+    const close = rest.indexOf('\n' + fence, m.index + fence.length);
+    if (close === -1) { segments.push({ text: rest, code: false }); rest = ''; break; }
+    segments.push({ text: rest.slice(0, m.index), code: false });
+    let inner = rest.slice(m.index + fence.length, close);
+    inner = inner.replace(/^\n/, '').replace(/\n$/, '');
+    segments.push({ text: inner, code: true });
+    rest = rest.slice(close + 1 + fence.length);
+  }
+  if (rest) segments.push({ text: rest, code: false });
+  let html = '';
+  for (const seg of segments) {
+    if (seg.code) html += '<tt>' + htmlEsc(seg.text) + '</tt>\n';
+    else html += blockMd(seg.text);
+  }
+  return html;
+}
+
 // Walk the entry chain backwards from the head, newest first.
-function walkEntries(db, headId) {
+function walkEntries(db, headId, cap = WALK_LIMIT) {
   const byId = new Map();
   const get = (id) => {
     if (byId.has(id)) return byId.get(id);
@@ -207,7 +311,7 @@ function walkEntries(db, headId) {
   const chain = [];
   const seen = new Set();
   let cur = headId;
-  while (cur && chain.length < WALK_LIMIT && !seen.has(cur)) {
+  while (cur && chain.length < cap && !seen.has(cur)) {
     seen.add(cur);
     let entry = get(cur);
     if (!entry) break;
@@ -221,7 +325,7 @@ function walkEntries(db, headId) {
   return chain;
 }
 
-function normalizeEntry(entry, answeredRequests) {
+function normalizeEntry(entry, answeredRequests, db = null, ctx = null) {
   const t = entry?.type;
   if (t === 'message') {
     if (entry.hidden) return null;
@@ -229,7 +333,16 @@ function normalizeEntry(entry, answeredRequests) {
     const role = msg.role;
     const parts = Array.isArray(msg.parts) ? msg.parts : [];
     const out = [];
-    const pushText = (text, kind) => { if (text) out.push({ kind, text: trunc(text) }); };
+    const pushText = (text, kind) => {
+      if (!text) return;
+      const s = trunc(text);
+      const o = { kind, text: s };
+      // Rich (markdown) rendering only for chat bubbles, and only when the
+      // caller asked for rich output (light paths like session listing skip
+      // it to stay cheap).
+      if (ctx?.rich && (kind === 'user' || kind === 'assistant')) o.html = mdToHtml(s);
+      out.push(o);
+    };
 
     // User messages: one bubble from all text parts (+ image placeholders).
     if (role === 'user') {
@@ -286,12 +399,51 @@ function normalizeEntry(entry, answeredRequests) {
     if (sc?.previewText) return { kind: 'system', text: String(sc.previewText) };
     return null;
   }
-  if (t === 'turnSummary') return { kind: 'system', text: '— earlier conversation was summarized —' };
+  if (t === 'turnSummary') return { kind: 'system', text: '— earlier conversation was summarized —', turnSummary: true };
   if (t === 'interrupted') return { kind: 'system', text: 'Interrupted' };
-  return null; // forkPoint, subSessionReference, resourceHold, ...
+  if (t === 'subSessionReference') return compactionCard(db, entry, ctx);
+  return null; // forkPoint, resourceHold, ...
 }
 
-function transcript(db, headId, limit = 100) {
+// A compaction marker is a subSessionReference into a transient "Compaction"
+// sub-session (source.ngModule = lmstudio/context-compaction-v1).
+// The card shows the compaction summary (newest assistant text in the
+// sub-session) expandable, plus a "worked for" duration taken from a
+// turnSummary entry in the sub-chain (fallback: the next main-chain entry).
+function compactionCard(db, entry, ctx) {
+  const ng = String(entry?.source?.ngModule || '');
+  const isCompaction = /context-compaction/i.test(ng)
+    || /compacted/i.test(String(entry?.doneTitle || ''));
+  if (!isCompaction || !db || !ctx?.rich) return null;
+  const card = { kind: 'compacted', title: entry.doneTitle || 'Compacted', workedForMs: null, files: 0, summary: '' };
+  try {
+    const sub = db.prepare('SELECT committed_head_entry_id FROM sessions WHERE session_id = ?').get(entry.sessionId);
+    if (sub?.committed_head_entry_id) {
+      const sc = walkEntries(db, sub.committed_head_entry_id, SUB_WALK_LIMIT);
+      for (const e of sc) {
+        if (e?.type === 'message' && e.message?.role === 'assistant') {
+          const txt = (e.message.parts || [])
+            .filter((p) => p?.type === 'text' && p.text)
+            .map((p) => String(p.text)).join('\n');
+          if (txt) { card.summary = truncSummary(txt); break; }
+        }
+      }
+      const ts = sc.find((e) => e?.type === 'turnSummary');
+      if (ts) {
+        if (Number(ts.durationMs) > 0) card.workedForMs = Math.round(ts.durationMs);
+        card.files = Array.isArray(ts.files) ? ts.files.length : 0;
+      }
+    }
+  } catch { /* keep whatever we managed to collect */ }
+  if (card.workedForMs == null && ctx.next?.type === 'turnSummary') {
+    if (Number(ctx.next.durationMs) > 0) card.workedForMs = Math.round(ctx.next.durationMs);
+    if (card.files === 0 && Array.isArray(ctx.next.files)) card.files = ctx.next.files.length;
+  }
+  if (card.summary) card.summaryHtml = mdToHtml(card.summary);
+  return card;
+}
+
+function transcript(db, headId, limit = 100, opts = {}) {
   const chain = walkEntries(db, headId);
   let lastEntryTs = 0;
   for (const e of chain) {
@@ -301,14 +453,28 @@ function transcript(db, headId, limit = 100) {
   const answered = new Set();
   for (const e of chain) if (e?.type === 'elicitationResponse' && e.requestId) answered.add(e.requestId);
   const out = [];
-  for (const e of chain) {
-    const ns = normalizeEntry(e, answered);
+  for (let i = 0; i < chain.length; i++) {
+    const ctx = { next: chain[i + 1] || null, rich: !!opts.rich };
+    const ns = normalizeEntry(chain[i], answered, db, ctx);
     if (!ns) continue;
     if (Array.isArray(ns)) { for (const n of ns) out.push(n); }
     else out.push(ns);
   }
   out.reverse(); // oldest → newest
-  const entries = out.slice(-Math.max(1, limit));
+  // When a compaction card is present it already carries the duration, so the
+  // bare "summarized" system line would just duplicate it — drop those.
+  if (opts.rich && out.some((n) => n.kind === 'compacted')) {
+    for (let i = out.length - 1; i >= 0; i--) if (out[i] && out[i].turnSummary) out.splice(i, 1);
+  }
+  // Newest-`limit` window, extended back to include the most recent
+  // compaction card if it falls outside it (long sessions push it back).
+  // The card carries the summary the user came to read, so it must stay in
+  // the response even when the live tail alone would exclude it.
+  let start = Math.max(0, out.length - Math.max(1, limit));
+  for (let i = start - 1; i >= 0; i--) {
+    if (out[i] && out[i].kind === 'compacted') { start = i; break; }
+  }
+  const entries = out.slice(start);
   let pending = null;
   for (let i = out.length - 1; i >= 0; i--) {
     const n = out[i];
@@ -427,7 +593,7 @@ const server = http.createServer((req, res) => {
       try {
         const detail = sessionDetail(db, decodeURIComponent(mTrans[2]));
         if (!detail) return sendJson(res, 404, { error: 'unknown session' });
-        const { entries, pendingApproval } = transcript(db, detail.headEntryId, limit);
+        const { entries, pendingApproval } = transcript(db, detail.headEntryId, limit, { rich: true });
         return sendJson(res, 200, {
           session: { id: detail.id, name: detail.name, updatedAt: detail.updatedAt, active: detail.active },
           pendingApproval,
