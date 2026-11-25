@@ -1,3 +1,4 @@
+
 # Bionic Remote
 
 A Sailfish OS application.
@@ -22,6 +23,12 @@ This app is the client:
 - **Session** — the rolling transcript (user / Bionic / tool calls / results)
   plus a banner when an approval is pending (M1 is read-only; approve/deny
   happens in the Bionic desktop app).
+
+## Screenshots
+
+<img height="500" alt="Screenshot_20261125_210443_001" src="https://github.com/user-attachments/assets/c0aee282-8b5c-4325-942f-d7f1b0822014" />
+<img height="500" alt="Screenshot_20261125_210502_001" src="https://github.com/user-attachments/assets/2bd44832-0799-4f00-917c-0f945015b71e" />
+  
 
 ## Bridge daemon setup
 
