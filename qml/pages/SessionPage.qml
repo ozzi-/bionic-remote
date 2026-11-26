@@ -453,14 +453,16 @@ Page {
                         topMargin: parent.cardPad
                     }
                     width: parent.width - 2 * parent.cardPad
-                    implicitHeight: headerLabel.implicitHeight + 4
-                                   + (sublineLabel.visible ? sublineLabel.implicitHeight + 2 : 0)
+                    implicitHeight: Math.max(headerLabel.implicitHeight + 4
+                                             + (sublineLabel.visible ? sublineLabel.implicitHeight + 2 : 0),
+                                             expandBtn.height)
                     height: implicitHeight
 
                     Label {
                         id: headerLabel
                         anchors.left: parent.left
-                        width: parent.width - 28
+                        // Leave room for the toggle button on the right.
+                        width: parent.width - 190
                         // Qt 5.6: qsTr() returns a QVariant — bare qsTr and string
                         // concatenation are safe, but calling methods on it (or
                         // wrapping in String()) throws and the label renders empty.
@@ -479,7 +481,7 @@ Page {
                     Label {
                         id: sublineLabel
                         anchors { left: parent.left; top: headerLabel.bottom; topMargin: 2 }
-                        width: parent.width - 28
+                        width: parent.width - 190
                         text: model.subline !== "" ? qsTr("Worked for ") + model.subline : ""
                         visible: model.subline !== ""
                         color: page.mutedColor
@@ -487,11 +489,24 @@ Page {
                         elide: Text.ElideRight
                     }
 
-                    Label {
-                        anchors.right: parent.right
-                        text: card.cardExpanded ? "▴" : "▾"
-                        color: page.mutedColor
-                        font.pixelSize: Theme.fontSizeSmall
+                    // Expand / Collapse toggle. MUST be a Silica Button, not a
+                    // MouseArea: Silica's Button runs a DragFilter that hands a
+                    // drag back to the list (onCanceled / preventStealing), so a
+                    // flick that STARTS on the button still scrolls. A plain
+                    // MouseArea grabs the touch — that is exactly why the old
+                    // whole-card MouseArea made scrolling impossible (every
+                    // scroll starting on a card toggled it instead).
+                    Button {
+                        id: expandBtn
+                        anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                        width: 200
+                        height: 64
+                        text: card.cardExpanded ? qsTr("Collapse") : qsTr("Expand")
+                        color: page.brandColor
+                        onClicked: {
+                            card.cardExpanded = !card.cardExpanded
+                            page.setExpanded(model.sig, card.cardExpanded)
+                        }
                     }
 
                 }
@@ -524,31 +539,32 @@ Page {
                         topMargin: parent.cardPad
                         rightMargin: parent.cardPad
                     }
-                    implicitHeight: collapseLabel.implicitHeight
+                    implicitHeight: collapseBtn.height
                     height: implicitHeight
-                    width: collapseLabel.implicitWidth
+                    width: collapseBtn.width
 
-                    Label {
-                        id: collapseLabel
+                    // Real Button (see expandBtn above for why not a MouseArea).
+                    Button {
+                        id: collapseBtn
+                        anchors.left: parent.left
+                        width: 200
+                        height: 64
                         text: qsTr("Collapse")
                         color: page.brandColor
-                        font.pixelSize: Theme.fontSizeMedium
+                        onClicked: {
+                            card.cardExpanded = false
+                            page.setExpanded(model.sig, false)
+                        }
                     }
                 }
 
-                // The WHOLE card is the tap target: one MouseArea on the card
-                // item, declared LAST so it is topmost in z-order (the pattern
-                // verified to receive touches on this stack — a MouseArea
-                // nested in the headerRow sub-item did not). Press toggles
-                // expand/collapse; the "Collapse" label above is a pure
-                // affordance (the card-level area handles the tap).
-                MouseArea {
-                    anchors.fill: parent
-                    onPressed: {
-                        card.cardExpanded = !card.cardExpanded
-                        page.setExpanded(model.sig, card.cardExpanded)
-                    }
-                }
+                // NOTE: the card body is deliberately NOT a tap target. Toggling
+                // happens only via the expandBtn (header) and collapseBtn
+                // (bottom) Buttons, so a touch anywhere else on the card —
+                // including the start of a scroll — passes through to the list.
+                // Do not re-add a whole-card MouseArea: it grabs the touch and
+                // every scroll gesture starting on the card toggles the card
+                // instead of scrolling (reported on phone, 0.1.0-12).
             }
 
             // ---------- approval card (interactive approve / deny) ----------

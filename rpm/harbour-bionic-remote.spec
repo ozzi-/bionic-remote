@@ -6,7 +6,7 @@ Name:       harbour-bionic-remote
 %{?qtc_builddir:%define _builddir %qtc_builddir}
 Summary:    Bionic Remote
 Version:    0.1.0
-Release:    12
+Release:    13
 Group:      Qt/Qt
 License:    MIT
 URL:        https://github.com/ozzi-

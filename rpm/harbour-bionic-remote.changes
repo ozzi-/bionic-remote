@@ -1,3 +1,10 @@
+* Thu Nov 26 2026 ozzi- <oz@oz-web.com> 0.1.0-13
+- Fix scrolling: replace the whole-card tap-to-toggle MouseArea (which grabbed
+  every touch, so any scroll starting on a card expanded/collapsed it instead
+  of scrolling) with dedicated Expand/Collapse Silica Buttons. Silica Buttons
+  hand drags back to the list (DragFilter), so scrolling works from anywhere,
+  even from on top of the buttons. Verified on the SFOS 5.1 emulator.
+
 * Thu Nov 26 2026 ozzi- <oz@oz-web.com> 0.1.0-12
 - M3a: remote Approve/Deny of tool + directory access — interactive approval
   card with choice buttons in the session view; bridge POST /approve drives
