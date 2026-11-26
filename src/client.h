@@ -20,21 +20,24 @@ public:
     Q_INVOKABLE void fetchSessions(const QString &projectId);
     Q_INVOKABLE void fetchTranscript(const QString &projectId, const QString &sessionId, int limit);
     Q_INVOKABLE void testConnection();
+    Q_INVOKABLE void approveChoice(const QString &projectId, const QString &sessionId, const QString &choice);
 
 Q_SIGNALS:
     void projectsResult(bool ok, const QString &json, const QString &error);
     void sessionsResult(bool ok, const QString &json, const QString &error);
     void transcriptResult(bool ok, const QString &json, const QString &error);
     void healthResult(bool ok, const QString &json, const QString &error);
+    void approveResult(bool ok, const QString &json, const QString &error);
 
 private:
-    enum Endpoint { Projects, Sessions, Transcript, Health };
+    enum Endpoint { Projects, Sessions, Transcript, Health, Approve };
 
     QNetworkAccessManager *m_manager;
     QString m_serverUrl;
     QString m_token;
 
     void doFetch(Endpoint endpoint, const QString &path);
+    void doPost(Endpoint endpoint, const QString &path, const QByteArray &body);
     void emitResult(Endpoint endpoint, bool ok, const QString &json, const QString &error);
     static QString extractError(const QByteArray &body);
 };

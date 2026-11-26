@@ -19,8 +19,55 @@ This app is the client:
 - **Sessions** — per-project session list with live "agent active" and
   "awaiting approval" indicators (auto-refreshes every 4 s).
 - **Session** — the rolling transcript (user / Bionic / tool calls / results,
-  thinking collapsed) plus a banner when an approval is pending (M1 is
-  read-only; approve/deny happens in the Bionic desktop app).
+  thinking collapsed). When a session is awaiting an approval (tool or
+  directory access), an interactive card shows the request with the
+  **Approve / Deny** choice buttons. Tapping one drives Bionic's own approval
+  UI over Chrome DevTools Protocol (CDP), so the decision goes through
+  Bionic's real code path rather than a raw write to its database.
+
+## Approve / deny from the phone
+
+To approve or deny a tool / directory-access request from the phone, the
+bridge has to drive Bionic's UI, which it does over **Chrome DevTools
+Protocol** (CDP). That requires one thing on the PC: **Bionic must be running
+with a remote-debugging port.**
+
+> Bionic's debug port is bound to **127.0.0.1 only**, so it is not reachable
+> from the LAN or the tailnet — the bridge talks to it locally on the same
+> machine. This is the safe configuration; keep it that way.
+
+**Bionic relaunch command** (run this *on the PC, in your own terminal* — the
+agent must not relaunch Bionic for you, because the agent is running *inside*
+Bionic and would kill itself):
+
+```sh
+# fully quit Bionic first, then relaunch with the local debug port:
+/app-bionic --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1
+```
+
+> The exact AppImage path varies (`~/.local/share/lm-studio/app-bionic@*`,
+> or your installed `bionic` binary). Adjust the path to wherever your Bionic
+> AppImage/binary lives. After relaunching, open the session you want to
+> control so its approval buttons are on screen.
+
+Then point the bridge at it (it already defaults to this, shown here for
+clarity — add to `bionic-remote.service` if you changed them):
+
+```sh
+Environment=CDP_HOST=127.0.0.1
+Environment=CDP_PORT=9222
+Environment=CDP_TIMEOUT_MS=8000
+```
+
+**How it works end-to-end:** the app shows the pending request's choice labels
+as buttons; tapping one POSTs the choice *value* to the bridge
+(`POST /v1/projects/<id>/sessions/<id>/approve`); the bridge maps the value to
+its label and instructs Bionic (via CDP `Runtime.evaluate`) to click the button
+whose visible text matches that label. You'll see "Sent to Bionic." in the app.
+
+If Bionic isn't running with the debug port, the approve action returns an error
+(reading projects / sessions / transcripts still works — only approve/deny needs
+CDP).
 
 ## Screenshots
 
@@ -94,6 +141,9 @@ Bridge environment variables:
 | `BIONIC_HOME`          | `~/.lmstudio`                    | Where Bionic keeps its data                                     |
 | `BRIDGE_BIND`          | `0.0.0.0`                        | Listen address — set to your Tailscale IP to serve tailnet-only |
 | `BRIDGE_ALLOWED_CIDRS` | permissive private ranges        | Strict source allowlist, e.g. `loopback,tailscale-v6,100.64.0.0/10` |
+| `CDP_HOST`             | `127.0.0.1`                    | Bionic's CDP endpoint host (keep on loopback for security)         |
+| `CDP_PORT`             | `9222`                         | Bionic's `--remote-debugging-port` (needed for approve/deny only)  |
+| `CDP_TIMEOUT_MS`       | `8000`                         | CDP call timeout in milliseconds                                    |
 
 ### 2. App on the phone
 
@@ -103,10 +153,10 @@ from `repo/dist/` on the build machine), then:
 
 ```sh
 # from the PC (replace <PHONE_IP> / <user> with your phone's)
-scp harbour-bionic-remote-0.1.0-10.aarch64.rpm <user>@<PHONE_IP>:~/
+scp harbour-bionic-remote-0.1.0-12.aarch64.rpm <user>@<PHONE_IP>:~/
 
 # on the phone (terminal app, or ssh)
-devel-su rpm -Uvh ~/harbour-bionic-remote-0.1.0-10.aarch64.rpm
+devel-su rpm -Uvh ~/harbour-bionic-remote-0.1.0-12.aarch64.rpm
 ```
 
 `rpm -Uvh` upgrades over a previous version; use `rpm -ivh` for a first install.
@@ -162,9 +212,12 @@ rm ~/bionic-token
   `tailscale-v6` covers `fd7a::/8`, and `loopback` is for local testing. The
   bridge listens only on the encrypted tailnet and only accepts tailnet
   sources.
-- The bridge is **read-only** against Bionic's data (opens SQLite stores
+- The bridge is **read-only** against Bionic's *data* (opens SQLite stores
   `readOnly`, all queries parameterized, project/session IDs must match the
-  registry — no path traversal).
+  registry — no path traversal). The only action that changes Bionic state is
+  approve/deny, and it does so by **driving Bionic's own UI over CDP on
+  loopback** — never by writing to Bionic's database directly. The CDP port is
+  bound to `127.0.0.1`, so only the bridge on the same machine can reach it.
 - The token is stored in **plaintext** on the phone (file mode `600`).
   Acceptable for a personal device; SFOS secure storage (libkey) would be
   the next step if this ever matters to you.

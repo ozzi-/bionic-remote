@@ -22,11 +22,17 @@ Page {
     property bool hasPending: false
     property string approvalTitle: ""
     property string approvalDesc: ""
+    property bool approvalSending: false
+    property string approvalStatus: ""
 
     // Expanded state survives model rebuilds, keyed by entry signature.
     property var expandedSigs: ({})
 
     ListModel { id: entryModel }
+
+    // Choice buttons for a pending approval (value + label), populated from
+    // the bridge's pendingApproval.choices on each transcript refresh.
+    ListModel { id: choiceModel }
 
     // ---------------- theme ----------------
     // SOLID per-theme palette (neutral grays, Bionic-style) — verified on
@@ -57,6 +63,13 @@ Page {
     property color cardBgColor: darkMode ? "#1F1F23" : "#F5F5F6"
     property color cardBorderColor: darkMode ? "#3A3A41" : "#D9D9DE"
     property color brandColor: "#7171E8"
+
+    // A Silica Button's natural height in this theme (~122 px measured on the
+    // 1088x2260 stack) plus a small gap. NOTE: `Theme.controlHeight` does NOT
+    // exist on this Qt 5.6 / Silica stack (not in the skill's verified-present
+    // Theme list), so `Theme.controlHeight + n` evaluates to NaN and any row
+    // math on it collapses — use this fixed constant instead.
+    readonly property int buttonRowH: 136
 
     // ---------------- helpers ----------------
 
@@ -182,11 +195,21 @@ Page {
             if (kind === "approval") {
                 var title = e.title || qsTr("Approval")
                 var desc = e.description || ""
-                var state = e.answered ? qsTr("answered") : qsTr("pending")
-                items.push({ "view": "line",
-                             "text": title + (desc !== "" ? " — " + desc : "")
-                                    + " (" + state + ")",
-                             "highlight": e.answered ? false : true })
+                if (e.answered) {
+                    items.push({ "view": "line",
+                                 "text": title + (desc !== "" ? " — " + desc : "")
+                                        + " — " + qsTr("answered"),
+                                 "highlight": false })
+                } else {
+                    // Pending approval → interactive card in the CONTENT list
+                    // (not the header). The header does not reflow to fit
+                    // dynamically-appearing children on this Qt 5.6 stack, so the
+                    // buttons must live where per-item height is explicit.
+                    items.push({ "view": "approval",
+                                 "title": title,
+                                 "desc": desc,
+                                 "sig": "ap|" + i })
+                }
                 i++
                 continue
             }
@@ -198,6 +221,14 @@ Page {
 
     function refresh() {
         client.fetchTranscript(page.projectId, page.sessionId, 150)
+    }
+
+    function sendApproval(choice) {
+        if (page.approvalSending || choice === "")
+            return
+        page.approvalSending = true
+        page.approvalStatus = qsTr("Sending to Bionic…")
+        client.approveChoice(page.projectId, page.sessionId, choice)
     }
 
     Component.onCompleted: refresh()
@@ -228,13 +259,22 @@ Page {
             }
             var ap = data.pendingApproval
             page.hasPending = !!ap
+            choiceModel.clear()
             if (ap) {
                 page.approvalTitle = ap.title || ""
                 page.approvalDesc = ap.description || ""
+                var cs = ap.choices || []
+                for (var ci = 0; ci < cs.length; ci++) {
+                    var cv = cs[ci]
+                    choiceModel.append({ "value": cv.value || "",
+                                         "label": cv.label || cv.value || "" })
+                }
             } else {
                 page.approvalTitle = ""
                 page.approvalDesc = ""
             }
+            if (!page.approvalSending)
+                page.approvalStatus = ""
             var entries = data.entries || []
             var items = page.buildItems(entries)
             entryModel.clear()
@@ -248,8 +288,20 @@ Page {
                     "count": it.count || 0,
                     "sig": it.sig || "",
                     "highlight": it.highlight === true,
-                    "expanded": (it.sig !== "" && page.expandedSigs[it.sig] === true)
+                    "expanded": (it.sig !== "" && page.expandedSigs[it.sig] === true),
+                    "title": it.title || "",
+                    "desc": it.desc || ""
                 })
+            }
+        }
+
+        onApproveResult: {
+            page.approvalSending = false
+            if (ok) {
+                page.approvalStatus = qsTr("Sent to Bionic.")
+                page.refresh()
+            } else {
+                page.approvalStatus = error !== "" ? error : qsTr("Failed")
             }
         }
     }
@@ -288,51 +340,11 @@ Page {
                 }
             }
 
-            Item {
-                id: banner
-                width: parent.width
-                height: page.hasPending ? bannerCol.implicitHeight + Theme.paddingMedium * 2 : 0
-                visible: page.hasPending
-
-            Rectangle {
-                anchors.fill: parent
-                color: page.darkMode ? "#26262E" : "#ECECF6"
-                border.color: page.brandColor
-                border.width: 1
-            }
-
-            Column {
-                id: bannerCol
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    verticalCenter: parent.verticalCenter
-                    leftMargin: Theme.horizontalPageMargin
-                    rightMargin: Theme.horizontalPageMargin
-                }
-                width: parent.width - 2 * Theme.horizontalPageMargin
-                spacing: 2
-
-                Label {
-                    text: qsTr("Approval pending: ") + page.approvalTitle
-                    elide: Text.ElideRight
-                    width: parent.width
-                }
-                Label {
-                    text: page.approvalDesc
-                    visible: page.approvalDesc !== ""
-                    wrapMode: Text.Wrap
-                    width: parent.width
-                    color: Theme.secondaryColor
-                }
-                Label {
-                    text: qsTr("Approve or deny it in the Bionic desktop app")
-                    color: Theme.secondaryColor
-                    elide: Text.ElideRight
-                    width: parent.width
-                }
-            }
-            }
+            // NOTE: the pending-approval card is rendered in the CONTENT list
+            // below (the `approval` delegate), not in this header. The
+            // SilicaListView header does not reflow to fit dynamically-appearing
+            // children on this Qt 5.6 stack, so a header banner never showed the
+            // choice buttons. Keep only the PageHeader here.
         }
 
         ViewPlaceholder {
@@ -349,7 +361,9 @@ Page {
                    : (model.view === "thinking" || model.view === "toolgroup"
                       || model.view === "compacted")
                      ? card.implicitHeight + 8
-                     : lineItem.implicitHeight + 10
+                     : (model.view === "approval"
+                        ? approvalCard.implicitHeight + 12
+                        : lineItem.implicitHeight + 10)
 
             property real mside: 14
 
@@ -533,6 +547,100 @@ Page {
                     onPressed: {
                         card.cardExpanded = !card.cardExpanded
                         page.setExpanded(model.sig, card.cardExpanded)
+                    }
+                }
+            }
+
+            // ---------- approval card (interactive approve / deny) ----------
+            // Lives in the CONTENT list with an explicit per-item height; the
+            // choice buttons are laid out by index inside a plain Item.
+            // ROOT CAUSE of the earlier blank button area: `Theme.controlHeight`
+            // does NOT exist on this Qt 5.6 / Silica stack, so `Theme.\
+            // controlHeight + n` collapsed to NaN and pushed buttons 2..N off-screen
+            // (y = INT_MIN / 2*INT_MIN). Row height therefore uses the fixed
+            // page.buttonRowH constant — never `Theme.controlHeight`.
+            Item {
+                id: approvalCard
+                visible: model.view === "approval"
+                width: parent.width - 2 * parent.mside
+                anchors { left: parent.left; top: parent.top; leftMargin: parent.mside }
+
+                property int apPad: 12
+                readonly property int rowCount: choiceModel.count
+                implicitHeight: apTitle.implicitHeight + 6
+                               + (apDesc.visible ? apDesc.implicitHeight + 10 : 0)
+                               + (rowCount > 0 ? rowCount * apCol.rowH : 0)
+                               + (apStatus.visible ? apStatus.implicitHeight + 10 : 0)
+                               + apPad * 2
+                height: implicitHeight
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 12
+                    color: page.darkMode ? "#26262E" : "#ECECF6"
+                    border.color: page.brandColor
+                    border.width: 1
+                }
+
+                // Vertical stack of title / desc / buttons / status, positioned
+                // by running offsets (no Column, which is where the Repeater
+                // failed to lay out).
+                Item {
+                    id: apCol
+                    anchors { left: parent.left; top: parent.top; leftMargin: parent.apPad; topMargin: parent.apPad }
+                    width: parent.width - 2 * parent.apPad
+                    readonly property int rowH: page.buttonRowH
+
+                    Label {
+                        id: apTitle
+                        width: parent.width
+                        text: qsTr("Approval pending: ") + model.title
+                        wrapMode: Text.Wrap
+                        color: page.fgColor
+                        font.pixelSize: Theme.fontSizeLarge
+                    }
+
+                    Label {
+                        id: apDesc
+                        anchors { left: parent.left; top: apTitle.bottom; topMargin: 6 }
+                        width: parent.width
+                        visible: model.desc !== ""
+                        text: model.desc
+                        wrapMode: Text.Wrap
+                        color: page.mutedColor
+                        font.pixelSize: Theme.fontSizeMedium
+                    }
+
+                    Item {
+                        id: apButtons
+                        anchors { left: parent.left; top: (apDesc.visible ? apDesc.bottom : apTitle.bottom); topMargin: 10 }
+                        width: parent.width
+                        height: choiceModel.count * apCol.rowH
+                        visible: choiceModel.count > 0
+
+                        Repeater {
+                            model: choiceModel
+                            delegate: Button {
+                                width: parent.width
+                                // Do NOT set `height: Theme.controlHeight` — that
+                                // constant does not exist on this stack; leave the
+                                // button at its natural implicitHeight.
+                                anchors { left: parent.left; top: parent.top; topMargin: index * apCol.rowH }
+                                text: model.label
+                                enabled: !page.approvalSending
+                                onClicked: page.sendApproval(model.value)
+                            }
+                        }
+                    }
+
+                    Label {
+                        id: apStatus
+                        anchors { left: parent.left; top: apButtons.bottom; topMargin: 10 }
+                        width: parent.width
+                        visible: page.approvalStatus !== ""
+                        text: page.approvalStatus
+                        color: page.brandColor
+                        font.pixelSize: Theme.fontSizeMedium
                     }
                 }
             }

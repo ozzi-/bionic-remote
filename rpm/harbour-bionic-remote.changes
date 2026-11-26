@@ -1,2 +1,10 @@
+* Thu Nov 26 2026 ozzi- <oz@oz-web.com> 0.1.0-12
+- M3a: remote Approve/Deny of tool + directory access — interactive approval
+  card with choice buttons in the session view; bridge POST /approve drives
+  Bionic's own approval UI over CDP (new bridge/cdp.mjs); client approveChoice()
+- Fix approval title/description/labels rendering (unwrap Bionic's
+  localizableMessage wrapper); choice-button layout uses a fixed row height
+  (Theme.controlHeight does not exist on the Qt 5.6 / Silica stack)
+
 * Sun Nov 16 2026 ozzi- <oz@oz-web.com> 0.1.0-1
 - Initial release: M1 read-only client (projects, live session progress, transcripts)

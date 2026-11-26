@@ -81,6 +81,15 @@ void Client::testConnection()
     doFetch(Health, QStringLiteral("/v1/health"));
 }
 
+void Client::approveChoice(const QString &projectId, const QString &sessionId, const QString &choice)
+{
+    const QJsonObject payload{{ QStringLiteral("choice"), choice }};
+    const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    doPost(Approve, QStringLiteral("/v1/projects/") + projectId
+             + QStringLiteral("/sessions/") + sessionId
+             + QStringLiteral("/approve"), body);
+}
+
 void Client::doFetch(Endpoint endpoint, const QString &path)
 {
     qInfo().noquote() << QStringLiteral("[BRC] fetch %1 -> %2 (tokenLen=%3)")
@@ -120,6 +129,40 @@ void Client::doFetch(Endpoint endpoint, const QString &path)
     });
 }
 
+void Client::doPost(Endpoint endpoint, const QString &path, const QByteArray &body)
+{
+    qInfo().noquote() << QStringLiteral("[BRC] post %1 -> %2 (tokenLen=%3)")
+                      .arg(endpoint).arg(m_serverUrl + path).arg(m_token.length());
+    if (m_serverUrl.isEmpty()) {
+        emitResult(endpoint, false, QString(), tr("No server configured"));
+        return;
+    }
+
+    QNetworkRequest request(QUrl::fromUserInput(m_serverUrl + path));
+    request.setRawHeader("Authorization", ("Bearer " + m_token).toUtf8());
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply *reply = m_manager->post(request, body);
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, endpoint, reply]() {
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = reply->error() == QNetworkReply::NoError
+                        && status >= 200 && status < 300;
+        const QByteArray respBody = reply->readAll();
+        QString error;
+        if (!ok) {
+            error = extractError(respBody);
+            if (error.isEmpty())
+                error = reply->errorString();
+            if (error.isEmpty())
+                error = tr("HTTP %1").arg(status);
+        }
+        qInfo().noquote() << QStringLiteral("[BRC] done %1 status=%2 err=%3")
+                          .arg(endpoint).arg(status).arg(reply->errorString());
+        reply->deleteLater();
+        emitResult(endpoint, ok, QString::fromUtf8(respBody), error);
+    });
+}
+
 QString Client::extractError(const QByteArray &body)
 {
     QJsonParseError parseError;
@@ -143,6 +186,9 @@ void Client::emitResult(Endpoint endpoint, bool ok, const QString &json, const Q
         break;
     case Health:
         emit healthResult(ok, json, error);
+        break;
+    case Approve:
+        emit approveResult(ok, json, error);
         break;
     }
 }

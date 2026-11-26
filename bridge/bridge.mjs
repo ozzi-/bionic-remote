@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { readBody, cdpApprove } from './cdp.mjs';
 
 const PORT = Number(process.env.BRIDGE_PORT || 8443);
 const BIND_ADDR = process.env.BRIDGE_BIND || '0.0.0.0';
@@ -169,7 +170,14 @@ function listSessions(db) {
 }
 
 function renderLoc(lm) {
-  const parts = lm?.descriptor?.defaultMessage;
+  // Bionic wraps localizable strings as
+  //   { localizableMessage: { descriptor: { defaultMessage: [...] } } }
+  // (older/other payloads may omit the wrapper). Unwrap defensively so both
+  // shapes render — otherwise the approval title/labels silently fell back to
+  // raw values (toolId / "session"), which would also break the CDP button
+  // match for remote approve/deny.
+  const inner = lm && lm.localizableMessage ? lm.localizableMessage : lm;
+  const parts = inner?.descriptor?.defaultMessage;
   if (!Array.isArray(parts)) return '';
   return parts.map((p) => (p?.type === 1 ? `[${p.value}]` : (p?.value ?? ''))).join('');
 }
@@ -526,7 +534,11 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
-const server = http.createServer((req, res) => {
+// Remote approve/deny (M3a) is implemented in ./cdp.mjs: it drives Bionic's
+// own UI over the Chrome DevTools Protocol so the choice goes through Bionic's
+// real code path. `readBody` + `cdpApprove` are imported at the top.
+
+const server = http.createServer(async (req, res) => {
   const remote = req.socket.remoteAddress || '';
   console.log(new Date().toISOString(), "REQ", remote, req.method, req.url,
     "auth=" + (req.headers['authorization'] ? 'yes' : 'no'),
@@ -612,6 +624,42 @@ const server = http.createServer((req, res) => {
         const detail = sessionDetail(db, decodeURIComponent(mDet[2]));
         if (!detail) return sendJson(res, 404, { error: 'unknown session' });
         return sendJson(res, 200, detail);
+      } finally { db.close(); }
+    }
+
+    const mApprove = p.match(/^\/v1\/projects\/([^/]+)\/sessions\/([^/]+)\/approve$/);
+    if (req.method === 'POST' && mApprove) {
+      const pr = loadProjects().find((x) => x.id === decodeURIComponent(mApprove[1]));
+      if (!pr) return sendJson(res, 404, { error: 'unknown project' });
+      if (!pr.dbPath) return sendJson(res, 503, { error: 'session store not found' });
+
+      const raw = await readBody(req);
+      let choice = null;
+      try {
+        choice = JSON.parse(raw || '{}').choice;
+      } catch { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+      if (!choice || typeof choice !== 'string') {
+        return sendJson(res, 400, { error: 'missing or invalid "choice" (string required)' });
+      }
+
+      const db = openDb(pr.dbPath);
+      try {
+        const detail = sessionDetail(db, decodeURIComponent(mApprove[2]));
+        if (!detail) return sendJson(res, 404, { error: 'unknown session' });
+        const ap = detail.pendingApproval;
+        if (!ap) {
+          return sendJson(res, 409, { error: 'no pending approval in this session right now' });
+        }
+        const choices = ap.choices || [];
+        const chosen = choices.find((c) => c.value === choice);
+        if (!chosen) {
+          return sendJson(res, 400, {
+            error: 'unknown choice',
+            available: choices.map((c) => ({ value: c.value, label: c.label })),
+          });
+        }
+        const cdp = await cdpApprove(chosen.label || choice);
+        return sendJson(res, 200, { ok: !!cdp.ok, choice, label: chosen.label, cdp });
       } finally { db.close(); }
     }
 
