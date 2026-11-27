@@ -169,17 +169,27 @@ function listSessions(db) {
   });
 }
 
-function renderLoc(lm) {
+function renderLoc(lm, partValues = null) {
   // Bionic wraps localizable strings as
   //   { localizableMessage: { descriptor: { defaultMessage: [...] } } }
   // (older/other payloads may omit the wrapper). Unwrap defensively so both
   // shapes render — otherwise the approval title/labels silently fell back to
   // raw values (toolId / "session"), which would also break the CDP button
   // match for remote approve/deny.
+  // type 1 parts are PLACEHOLDERS (e.g. "[path]"): if a partValues map is
+  // supplied, substitute the concrete value (real Bionic keeps it there —
+  // top-level, in the description wrapper, or in the step question).
   const inner = lm && lm.localizableMessage ? lm.localizableMessage : lm;
   const parts = inner?.descriptor?.defaultMessage;
   if (!Array.isArray(parts)) return '';
-  return parts.map((p) => (p?.type === 1 ? `[${p.value}]` : (p?.value ?? ''))).join('');
+  return parts.map((p) => {
+    if (p?.type === 1) {
+      const v = partValues ? partValues[p.value] : null;
+      if (v != null) return typeof v === 'object' ? (v.text || JSON.stringify(v)) : String(v);
+      return `[${p.value}]`;
+    }
+    return p?.value ?? '';
+  }).join('');
 }
 
 function flattenPartValues(pv) {
@@ -390,12 +400,20 @@ function normalizeEntry(entry, answeredRequests, db = null, ctx = null) {
     return out.length > 0 ? out : null;
   }
   if (t === 'elicitationRequest') {
+    // partValues hold the concrete values behind the [placeholder] markers
+    // (e.g. the directory path). Older payloads carry them top-level; real
+    // Bionic nests them in the description wrapper (and the step question).
+    const pv = entry.partValues
+      || entry.description?.partValues
+      || entry.description?.localizableMessage?.partValues
+      || (entry.steps || [])[0]?.question?.partValues
+      || null;
     const choices = (entry.steps || []).flatMap((s) => (s?.choices || []).map((c) => ({ value: c.value, label: renderLoc(c.label) || String(c.value) })));
     return {
       kind: 'approval',
       title: renderLoc(entry.title) || (entry.source?.toolId || 'Approval request'),
-      description: renderLoc(entry.description),
-      details: flattenPartValues(entry.partValues),
+      description: renderLoc(entry.description, pv),
+      details: flattenPartValues(pv),
       tool: entry.source?.toolId || null,
       choices,
       requestId: entry.requestId || null,
@@ -478,17 +496,74 @@ function transcript(db, headId, limit = 100, opts = {}) {
   // compaction card if it falls outside it (long sessions push it back).
   // The card carries the summary the user came to read, so it must stay in
   // the response even when the live tail alone would exclude it.
-  let start = Math.max(0, out.length - Math.max(1, limit));
-  for (let i = start - 1; i >= 0; i--) {
-    if (out[i] && out[i].kind === 'compacted') { start = i; break; }
-  }
-  const entries = out.slice(start);
   let pending = null;
   for (let i = out.length - 1; i >= 0; i--) {
     const n = out[i];
     if (n.kind === 'approval') { pending = n.answered ? null : n; break; }
   }
+  // Bionic keeps an UNANSWERED elicitationRequest as a dangling sibling of
+  // the committed head: its previousId points at the head, but
+  // committed_head_entry_id only moves once the user answers — so the chain
+  // walk above never sees it (verified on a real 121 MB store; test data with
+  // the request AS the head is caught by the scan above). The newest
+  // unanswered dangling request is the active approval.
+  if (!pending) {
+    try { pending = findDanglingApproval(db, headId, answered); } catch { pending = null; }
+  }
+  if (pending) out.push(pending); // newest event → tail (out is oldest→newest)
+  let start = Math.max(0, out.length - Math.max(1, limit));
+  for (let i = start - 1; i >= 0; i--) {
+    if (out[i] && out[i].kind === 'compacted') { start = i; break; }
+  }
+  const entries = out.slice(start);
   return { entries, pendingApproval: pending, lastEntryTs };
+}
+
+// Find the active (newest, unanswered) elicitationRequest hanging off the
+// committed head. Retries stack as further siblings of the head or on top of
+// a sibling request. Only id / previous_id indexed lookups are used (both are
+// indexed in Bionic's schema), so this stays cheap even at 100+ MB stores and
+// per-poll cadence. `answered` is the set of requestIds that already have a
+// response inside the committed chain (built by transcript()).
+function findDanglingApproval(db, headId, answered) {
+  if (!db || !headId) return null;
+  const cands = [];
+  const gather = (prevIds) => {
+    if (!prevIds.length) return;
+    const ph = prevIds.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT id, rowid, entry_json FROM chat_entries WHERE previous_id IN (${ph}) ORDER BY rowid`
+    ).all(...prevIds);
+    for (const r of rows) {
+      let e = null;
+      try { e = JSON.parse(r.entry_json); } catch { continue; }
+      if (e && e.type === 'elicitationRequest' && e.requestId && !answered.has(e.requestId)) {
+        cands.push({ id: r.id, rowid: r.rowid, entry: e });
+      }
+    }
+  };
+  gather([headId]);
+  if (cands.length === 0) return null;
+  // One more level: a retry can chain on top of a sibling request.
+  gather(cands.map((c) => c.id));
+  // Newest first. Real entries carry no createdTimestamp — rowid (insertion
+  // order) is the only reliable recency signal.
+  cands.sort((a, b) => b.rowid - a.rowid);
+  for (const c of cands) {
+    // A response committed as a child of this request means it is answered.
+    let answeredByChild = false;
+    try {
+      for (const k of db.prepare('SELECT entry_json FROM chat_entries WHERE previous_id = ?').all(c.id)) {
+        let e = null;
+        try { e = JSON.parse(k.entry_json); } catch { continue; }
+        if (e && e.type === 'elicitationResponse' && e.requestId === c.entry.requestId) { answeredByChild = true; break; }
+      }
+    } catch { /* keep candidate */ }
+    if (answeredByChild) continue;
+    const n = normalizeEntry(c.entry, answered);
+    if (n && n.kind === 'approval' && !n.answered) return n;
+  }
+  return null;
 }
 
 const STALE_WINDOW_MS = 15 * 60 * 1000;
