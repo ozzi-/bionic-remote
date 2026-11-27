@@ -26,7 +26,7 @@ This app is the client:
 
 <img height="500" alt="Screenshot_20261125_210443_001" src="https://github.com/user-attachments/assets/c0aee282-8b5c-4325-942f-d7f1b0822014" />
 <img height="500" alt="Screenshot_20261125_210502_001" src="https://github.com/user-attachments/assets/2bd44832-0799-4f00-917c-0f945015b71e" />
-<img width="500" alt="Screenshot_20261127_171016_001" src="https://github.com/user-attachments/assets/048c0412-526b-4003-9623-830302f584f1" />
+<img height="500" alt="Screenshot_20261127_171016_001" src="https://github.com/user-attachments/assets/048c0412-526b-4003-9623-830302f584f1" />
 
 ## Getting started
 
