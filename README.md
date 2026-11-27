@@ -1,5 +1,3 @@
-<img width="1032" height="2272" alt="Screenshot_20261127_171016_001" src="https://github.com/user-attachments/assets/52220bfb-4e61-4703-bdcb-43e8d0bbfc10" />
-
 # Bionic Remote
 
 A Sailfish OS application.
